@@ -16,22 +16,6 @@ Requirements: Node.js 20.9+, a Supabase project, and the project's service-role 
    - `supabase/migrations/202611050001_qura_admin_public_voting.sql`
 
    The second migration retires the student-account voting schema and renames its existing tables to `legacy_school_*` rather than deleting them. Review your school's retention policy before removing that legacy data.
-3. Create the initial administrator through the protected seed script. Set the Supabase values in the process environment and enter a password of at least 14 characters:
-
-   ```powershell
-   $env:QURA_ADMIN_EMAIL = Read-Host "Administrator email"
-   $securePassword = Read-Host "Administrator password" -AsSecureString
-   $env:QURA_ADMIN_PASSWORD = [System.Net.NetworkCredential]::new("", $securePassword).Password
-   node --env-file=.env.local scripts/seed-admin.mjs
-   Remove-Item Env:QURA_ADMIN_PASSWORD
-   Remove-Item Env:QURA_ADMIN_EMAIL
-   ```
-
-   The seed script refuses to create another active administrator. There is no public admin or voter registration endpoint.
-4. Optional bot protection: configure a Cloudflare Turnstile site key in `NEXT_PUBLIC_TURNSTILE_SITE_KEY` and its server secret in `TURNSTILE_SECRET_KEY`. Only then enable bot protection on a public poll. If it is not configured, protected polls refuse ballots.
-5. Run `npm run dev`, then open `/admin` and sign in with the seeded administrator.
-
-Supabase Auth is not used for QURA sign-in. Disable public sign-ups in the Supabase project as defense in depth; the QURA administrator account is managed only by the protected seed process.
 
 ## Administrator workflow
 
