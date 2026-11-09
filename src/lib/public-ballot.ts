@@ -17,12 +17,13 @@ export type PublicBallot = {
   isOpen: boolean;
   hasOpened: boolean;
   invitationUsed: boolean;
+  eligibleVerified: boolean;
   questions: { id: string; prompt: string; minSelections: number; maxSelections: number; options: { id: string; label: string }[] }[];
   positions: { id: string; title: string; minSelections: number; maxSelections: number; candidates: { id: string; name: string; grade: string; statement: string; photoUrl: string | null }[] }[];
   invitation: boolean;
 };
 
-export async function getPublicBallot(token: string): Promise<PublicBallot | null> {
+export async function getPublicBallot(token: string, eligibleVerified = false): Promise<PublicBallot | null> {
   if (!/^[A-Za-z0-9_-]{32,64}$/.test(token)) return null;
   const supabase = createAdminSupabase();
   const tokenHash = hashToken(token);
@@ -57,6 +58,7 @@ export async function getPublicBallot(token: string): Promise<PublicBallot | nul
       isOpen: poll.status === "open" && Date.now() >= Date.parse(poll.opens_at) && Date.now() < Date.parse(poll.closes_at),
       hasOpened: Date.now() >= Date.parse(poll.opens_at),
       invitationUsed: false,
+      eligibleVerified: false,
       questions: questions.map((question) => ({
         id: question.id,
         prompt: question.prompt,
@@ -86,6 +88,29 @@ export async function getPublicBallot(token: string): Promise<PublicBallot | nul
   const { data: positions, error: positionError } = await supabase.from("election_positions")
     .select("id, title, min_selections, max_selections").eq("election_id", election.id).order("position");
   if (positionError) throw new Error(`Could not load election positions: ${positionError.message}`);
+  const canRevealBallot = eligibleVerified && invitation.used_at === null;
+  if (!canRevealBallot) {
+    return {
+      eventType: "election",
+      eventId: election.id,
+      title: election.title,
+      description: election.description,
+      status: election.status,
+      opensAt: election.opens_at,
+      closesAt: election.closes_at,
+      resultsPublic: election.results_public,
+      botProtection: false,
+      sessionDuplicateProtection: true,
+      rateLimitPerMinute: 30,
+      isOpen: election.status === "open" && Date.now() >= Date.parse(election.opens_at) && Date.now() < Date.parse(election.closes_at),
+      hasOpened: Date.now() >= Date.parse(election.opens_at),
+      invitationUsed: invitation.used_at !== null,
+      eligibleVerified: false,
+      questions: [],
+      positions: [],
+      invitation: true,
+    };
+  }
   const positionIds = positions.map((position) => position.id);
   const { data: candidates, error: candidateError } = positionIds.length
     ? await supabase.from("candidates").select("id, position_id, name, grade, statement, media_file_id").in("position_id", positionIds)
@@ -113,6 +138,7 @@ export async function getPublicBallot(token: string): Promise<PublicBallot | nul
     isOpen: election.status === "open" && Date.now() >= Date.parse(election.opens_at) && Date.now() < Date.parse(election.closes_at),
     hasOpened: Date.now() >= Date.parse(election.opens_at),
     invitationUsed: invitation.used_at !== null,
+    eligibleVerified: true,
     questions: [],
     positions: positions.map((position) => ({
       id: position.id,

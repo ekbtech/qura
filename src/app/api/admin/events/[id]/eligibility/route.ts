@@ -26,7 +26,7 @@ export async function POST(request: Request, context: Context) {
     return NextResponse.json({ message: "CSV must have a voter_id,email header and contain 1–5000 voters." }, { status: 400 });
   }
 
-  const entries: { voter_ref_hash: string; email: string }[] = [];
+  const entries: { voter_ref_hash: string; email: string; voter_code: string }[] = [];
   const seen = new Set<string>();
   for (const [index, line] of lines.slice(1).entries()) {
     const fields = line.split(",");
@@ -39,18 +39,37 @@ export async function POST(request: Request, context: Context) {
     const voterRefHash = hashSensitiveValue(voterId);
     if (seen.has(voterRefHash)) return NextResponse.json({ message: `Duplicate voter ID on CSV row ${index + 2}.` }, { status: 400 });
     seen.add(voterRefHash);
-    entries.push({ voter_ref_hash: voterRefHash, email });
+    entries.push({ voter_ref_hash: voterRefHash, email, voter_code: voterId });
   }
 
   const { data: eligibility, error } = await supabase.from("voter_eligibility")
-    .insert(entries.map((entry) => ({ election_id: electionId, ...entry })))
-    .select("id, email");
+    .insert(entries.map((entry) => ({
+      election_id: electionId,
+      voter_ref_hash: entry.voter_ref_hash,
+      email: entry.email,
+    })))
+    .select("id, email, voter_ref_hash");
   if (error) {
     console.error("Voter eligibility import failed:", error.message);
     return NextResponse.json({ message: "Eligibility import failed. Check for duplicate voters already imported." }, { status: 409 });
   }
 
-  const invitations = eligibility.map((entry) => ({ entry, token: createOpaqueToken() }));
+  const voterRecords = new Map(entries.map((entry) => [entry.voter_ref_hash, entry]));
+  const invitations: { entry: (typeof eligibility)[number]; token: string; email: string; voterCode: string }[] = [];
+  for (const entry of eligibility) {
+    const voterRecord = voterRecords.get(entry.voter_ref_hash);
+    if (!voterRecord) {
+      await supabase.from("voter_eligibility").delete().eq("election_id", electionId)
+        .in("id", eligibility.map((item) => item.id));
+      return NextResponse.json({ message: "Could not match invitation codes to eligible voters." }, { status: 503 });
+    }
+    invitations.push({
+      entry,
+      token: createOpaqueToken(),
+      email: voterRecord.email,
+      voterCode: voterRecord.voter_code,
+    });
+  }
   const { error: invitationError } = await supabase.from("invitation_tokens").insert(invitations.map(({ entry, token }) => ({
     eligibility_id: entry.id,
     election_id: electionId,
@@ -65,10 +84,11 @@ export async function POST(request: Request, context: Context) {
 
   await writeAuditLog(admin.id, "election.eligibility.imported", "election", electionId, { count: eligibility.length });
   const baseUrl = new URL(request.url).origin;
+  const csvCell = (value: string) => `"${value.replace(/"/g, '""')}"`;
   const csv = [
-    "email,voting_link",
-    ...invitations.map(({ entry, token }) =>
-      `${entry.email},${baseUrl}/vote/${token}`),
+    "email,voter_code,voting_link",
+    ...invitations.map(({ token, email, voterCode }) =>
+      `${csvCell(email)},${csvCell(voterCode)},${csvCell(`${baseUrl}/vote/${token}`)}`),
   ].join("\r\n");
   return new Response(csv, {
     status: 201,

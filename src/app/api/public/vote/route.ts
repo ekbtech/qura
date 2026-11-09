@@ -1,7 +1,13 @@
 import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
 import { createAdminSupabase } from "@/lib/supabase/admin";
-import { createRateLimitKey, hashSensitiveValue, hashToken } from "@/lib/qura-security";
+import {
+  createRateLimitKey,
+  ELECTION_VERIFICATION_COOKIE,
+  hashSensitiveValue,
+  hashToken,
+  isElectionInvitationVerified,
+} from "@/lib/qura-security";
 import { getPublicBallot } from "@/lib/public-ballot";
 import { requestAddress, sameOriginRequest } from "@/lib/admin-session";
 
@@ -52,6 +58,10 @@ export async function POST(request: Request) {
   }
   if (typeof body.honeypot === "string" && body.honeypot.trim()) {
     return NextResponse.json({ message: "Your ballot could not be accepted." }, { status: 400 });
+  }
+  if (ballot.eventType === "election" &&
+      !isElectionInvitationVerified(body.token, (await cookies()).get(ELECTION_VERIFICATION_COOKIE)?.value)) {
+    return NextResponse.json({ message: "Verify your voting code before submitting a ballot." }, { status: 403 });
   }
 
   const supabase = createAdminSupabase();

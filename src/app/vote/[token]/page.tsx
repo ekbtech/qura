@@ -1,5 +1,7 @@
 import { PublicBallotView } from "@/components/public-ballot-view";
 import { getPublicBallot } from "@/lib/public-ballot";
+import { cookies } from "next/headers";
+import { ELECTION_VERIFICATION_COOKIE, isElectionInvitationVerified } from "@/lib/qura-security";
 import { Suspense } from "react";
 
 type Props = { params: Promise<{ token: string }> };
@@ -14,6 +16,8 @@ export default function VotePage({ params }: Props) {
 
 async function Ballot({ params }: Props) {
   const { token } = await params;
-  const ballot = await getPublicBallot(token);
+  const cookieStore = await cookies();
+  const eligibleVerified = isElectionInvitationVerified(token, cookieStore.get(ELECTION_VERIFICATION_COOKIE)?.value);
+  const ballot = await getPublicBallot(token, eligibleVerified);
   return <PublicBallotView token={token} ballot={ballot} />;
 }

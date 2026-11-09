@@ -2,6 +2,7 @@
 
 import Image from "next/image";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { Turnstile } from "@marsidev/react-turnstile";
 import { useEffect, useMemo, useState } from "react";
 import type { PublicBallot } from "@/lib/public-ballot";
@@ -27,9 +28,12 @@ function groupPublicResults(rows: PublicResults["results"]) {
 }
 
 export function PublicBallotView({ token, ballot }: Props) {
+  const router = useRouter();
   const [sessionStarted, setSessionStarted] = useState(false);
   const [busy, setBusy] = useState(false);
   const [hasVoted, setHasVoted] = useState(false);
+  const [verificationCode, setVerificationCode] = useState("");
+  const [reviewing, setReviewing] = useState(false);
   const [selections, setSelections] = useState<Record<string, string[]>>({});
   const [captchaToken, setCaptchaToken] = useState("");
   const [notice, setNotice] = useState<Notice | null>(null);
@@ -68,6 +72,7 @@ export function PublicBallotView({ token, ballot }: Props) {
   }, [ballot, selections]);
 
   function choose(groupId: string, value: string, maxSelections: number) {
+    setReviewing(false);
     setSelections((current) => {
       const selected = current[groupId] ?? [];
       const next = selected.includes(value)
@@ -81,9 +86,39 @@ export function PublicBallotView({ token, ballot }: Props) {
     });
   }
 
+  async function verifyEligibility(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setBusy(true);
+    setNotice(null);
+    try {
+      const response = await fetch("/api/public/verify", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ token, code: verificationCode }),
+      });
+      const result = await response.json() as { message?: string };
+      if (!response.ok) {
+        setNotice({ kind: "error", text: result.message ?? "That voting code could not be verified." });
+        return;
+      }
+      setVerificationCode("");
+      setNotice({ kind: "success", text: "Eligibility verified. Your ballot is ready." });
+      router.refresh();
+    } catch {
+      setNotice({ kind: "error", text: "Verification is temporarily unavailable. Please try again." });
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!ballot || !hasSelection) return;
+    if (ballot.eventType === "election" && !reviewing) {
+      setReviewing(true);
+      setNotice(null);
+      return;
+    }
     setBusy(true);
     setNotice(null);
     try {
@@ -161,6 +196,10 @@ export function PublicBallotView({ token, ballot }: Props) {
               </div>
             </section>
 
+            {ballot.eventType === "election" && isOpen && <ElectionProgress
+              step={hasVoted || ballot.invitationUsed ? 4 : !ballot.eligibleVerified ? 1 : reviewing ? 3 : 2}
+            />}
+
             {hasVoted || ballot.invitationUsed ? (
               <section className="public-card public-success">
                 <span className="success-mark" aria-hidden="true">✓</span>
@@ -178,16 +217,51 @@ export function PublicBallotView({ token, ballot }: Props) {
                 {resultsAvailable && <button className="public-secondary-link" type="button" onClick={() => void loadPublicResults()}>View published results</button>}
                 {publicResults && <PublicResultTable results={publicResults} />}
               </section>
+            ) : ballot.eventType === "election" && !ballot.eligibleVerified ? (
+              <form className="public-card public-verify-card" onSubmit={(event) => void verifyEligibility(event)}>
+                <span className="public-overline">STEP 1 · VERIFY ELIGIBILITY</span>
+                <h2>Enter your voting code</h2>
+                <p>Your unique code confirms you are eligible for this election. It is not stored with your ballot.</p>
+                <label htmlFor="voter-code">Unique voting code</label>
+                <input
+                  id="voter-code"
+                  className="text-input"
+                  autoComplete="one-time-code"
+                  maxLength={100}
+                  required
+                  value={verificationCode}
+                  onChange={(event) => setVerificationCode(event.target.value)}
+                  placeholder="Enter the code from your invitation"
+                />
+                <button className="primary-button" disabled={busy || verificationCode.trim().length < 2}>
+                  {busy ? "Verifying…" : "Verify and continue"} <span aria-hidden="true">→</span>
+                </button>
+                <p className="public-privacy">Your code is only used to verify eligibility.</p>
+              </form>
             ) : (
               <form className="public-card public-ballot-form" onSubmit={submit}>
                 <div className="public-form-heading">
                   <span className="eyebrow dark-eyebrow"><span className="eyebrow-line" /> YOUR BALLOT</span>
                   <p>{ballot.invitation
-                    ? "One ballot per invitation."
+                    ? reviewing ? "Review your selections before submitting." : "One ballot per invitation."
                       : "Anyone with this poll link can vote."}</p>
                 </div>
 
-                {ballot.eventType === "poll" && ballot.questions.map((question) => (
+                {ballot.eventType === "election" && reviewing ? (
+                  <section className="public-review" aria-label="Review your selections">
+                    <h2>Review your choices</h2>
+                    <p>Check each position. You can go back and change your selections before submitting.</p>
+                    {ballot.positions.map((position) => {
+                      const selected = position.candidates.filter((candidate) =>
+                        (selections[position.id] ?? []).includes(candidate.id),
+                      );
+                      return <div className="public-review-row" key={position.id}>
+                        <strong>{position.title}</strong>
+                        <span>{selected.length ? selected.map((candidate) => candidate.name).join(", ") : "No selection"}</span>
+                      </div>;
+                    })}
+                  </section>
+                ) : ballot.eventType === "poll" && ballot.questions.map((question) => (
                   <fieldset className="public-question" key={question.id}>
                     <legend>{question.prompt}</legend>
                     <p className="selection-hint">{question.maxSelections === 1 ? "Choose one" : `Choose up to ${question.maxSelections}`}</p>
@@ -204,7 +278,7 @@ export function PublicBallotView({ token, ballot }: Props) {
                   </fieldset>
                 ))}
 
-                {ballot.eventType === "election" && ballot.positions.map((position) => (
+                {!reviewing && ballot.eventType === "election" && ballot.positions.map((position) => (
                   <fieldset className="public-question" key={position.id}>
                     <legend>{position.title}</legend>
                     <p className="selection-hint">{position.maxSelections === 1 ? "Choose one" : `Choose up to ${position.maxSelections}`}</p>
@@ -236,15 +310,28 @@ export function PublicBallotView({ token, ballot }: Props) {
                 {ballot.botProtection && !process.env.NEXT_PUBLIC_TURNSTILE_SITE_KEY && (
                   <p className="public-warning">Anti-bot protection is not configured. This poll cannot accept votes until the administrator configures it.</p>
                 )}
-                <button className="primary-button" disabled={busy || !hasSelection || !sessionReady ||
-                  (ballot.botProtection && (!captchaToken || !process.env.NEXT_PUBLIC_TURNSTILE_SITE_KEY))}>
-                  {busy ? "Submitting ballot..." : "Submit ballot"} <span aria-hidden="true">→</span>
-                </button>
-                <p className="public-privacy">
-                  {ballot.eventType === "election" || ballot.sessionDuplicateProtection
+                <div className="public-submit-actions">
+                  {ballot.eventType === "election" && <button className="small-action" type="button" disabled={busy} onClick={() => {
+                    if (reviewing) {
+                      setReviewing(false);
+                      return;
+                    }
+                    setSelections({});
+                    setNotice({ kind: "info", text: "Your selections have been reset." });
+                  }}>{reviewing ? "Edit my choices" : "Reset selection"}</button>}
+                  <button className="primary-button" disabled={busy || !hasSelection || !sessionReady ||
+                    (ballot.botProtection && (!captchaToken || !process.env.NEXT_PUBLIC_TURNSTILE_SITE_KEY))}>
+                    {busy ? "Submitting ballot..." : ballot.eventType === "election"
+                      ? reviewing ? "Submit my vote" : "Review & submit"
+                      : "Submit ballot"} <span aria-hidden="true">→</span>
+                  </button>
+                </div>
+                {ballot.eventType === "election" && <p className="public-privacy public-confidentiality">Your vote is confidential and cannot be changed after submission. Your identity is stored separately from your ballot choices.</p>}
+                {ballot.eventType === "poll" && <p className="public-privacy">
+                  {ballot.sessionDuplicateProtection
                     ? "Voter identity is separate from ballot choices."
                     : "Public links cannot guarantee one vote per person."}
-                </p>
+                </p>}
               </form>
             )}
             {notice && <p className={`notice notice-${notice.kind}`} role={notice.kind === "error" ? "alert" : "status"}>{notice.text}</p>}
@@ -253,6 +340,25 @@ export function PublicBallotView({ token, ballot }: Props) {
       </div>
       <footer className="public-footer">QURA Voting</footer>
     </main>
+  );
+}
+
+function ElectionProgress({ step }: { step: number }) {
+  const stages = ["Verify eligibility", "Select candidates", "Review & submit", "Confirmation"];
+  return (
+    <ol className="public-progress" aria-label="Voting progress">
+      {stages.map((stage, index) => {
+        const number = index + 1;
+        const complete = number < step;
+        const current = number === step;
+        return (
+          <li className={current ? "public-progress-current" : complete ? "public-progress-complete" : ""} key={stage} aria-current={current ? "step" : undefined}>
+            <span className="public-progress-marker" aria-hidden="true">{complete ? "✓" : number}</span>
+            <span>{stage}</span>
+          </li>
+        );
+      })}
+    </ol>
   );
 }
 

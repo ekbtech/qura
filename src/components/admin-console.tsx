@@ -7,6 +7,11 @@ import { useCallback, useEffect, useState } from "react";
 import type { FormEvent, ReactNode } from "react";
 
 type Admin = { id: string; email: string };
+class AdminApiError extends Error {
+  constructor(message: string, readonly status: number) {
+    super(message);
+  }
+}
 type Candidate = {
   id: string; name: string; grade: string; statement: string;
   media_file_id: string | null; photoUrl: string | null;
@@ -112,14 +117,13 @@ async function api<T>(url: string, init?: RequestInit): Promise<T> {
   const response = await fetch(url, { ...init, cache: "no-store" });
   if (!response.ok) {
     const result = await response.json().catch(() => ({})) as { message?: string };
-    throw new Error(result.message ?? "Request failed. Please try again.");
+    throw new AdminApiError(result.message ?? "Request failed. Please try again.", response.status);
   }
   return response.json() as Promise<T>;
 }
 
 export function AdminConsole() {
   const [admin, setAdmin] = useState<Admin | null>(null);
-  const [authLoading, setAuthLoading] = useState(true);
   const [dashboard, setDashboard] = useState<DashboardData | null>(null);
   const [dashboardLoading, setDashboardLoading] = useState(false);
   const [dashboardError, setDashboardError] = useState<string | null>(null);
@@ -138,6 +142,18 @@ export function AdminConsole() {
   const [statusFilter, setStatusFilter] = useState("all");
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [eventPage, setEventPage] = useState(1);
+
+  function showActionError(error: unknown, fallback: string) {
+    if (error instanceof AdminApiError && error.status === 401) {
+      setAdmin(null);
+      setDashboard(null);
+      setEditor(null);
+      setConfirmation(null);
+      setNotice({ kind: "error", text: "Your administrator session expired. Sign in again to continue." });
+      return;
+    }
+    setNotice({ kind: "error", text: error instanceof Error ? error.message : fallback });
+  }
 
   const loadDashboard = useCallback(async () => {
     setDashboardLoading(true);
@@ -164,8 +180,7 @@ export function AdminConsole() {
         text: error instanceof Error && error.name === "TimeoutError"
           ? "Administrator session check timed out. Please sign in or refresh the page."
           : error instanceof Error ? error.message : "Could not check administrator session.",
-      }))
-      .finally(() => setAuthLoading(false));
+      }));
   }, [loadDashboard]);
 
   async function handleLogin(event: FormEvent<HTMLFormElement>) {
@@ -178,10 +193,11 @@ export function AdminConsole() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ email, password }),
       });
+      await loadDashboard();
       setAdmin(result.admin);
       setPassword("");
-      await loadDashboard();
     } catch (error) {
+      setAdmin(null);
       setNotice({ kind: "error", text: error instanceof Error ? error.message : "Administrator sign-in failed." });
     } finally {
       setBusy(false);
@@ -211,7 +227,7 @@ export function AdminConsole() {
       await loadDashboard();
       if (successText) setNotice({ kind: "success", text: successText });
     } catch (error) {
-      setNotice({ kind: "error", text: error instanceof Error ? error.message : "Action failed." });
+      showActionError(error, "Action failed.");
     } finally {
       setBusy(false);
     }
@@ -252,14 +268,17 @@ export function AdminConsole() {
             uploadForm.set("file", photo);
             const response = await fetch("/api/admin/media", { method: "POST", body: uploadForm });
             const result = await response.json() as { mediaFileId?: string; message?: string };
-            if (!response.ok || !result.mediaFileId) throw new Error(result.message ?? "Photo upload failed.");
+            if (!response.ok) throw new AdminApiError(result.message ?? "Photo upload failed.", response.status);
+            if (!result.mediaFileId) throw new Error("Photo upload did not return a file ID.");
             mediaFileId = result.mediaFileId;
           }
           const candidate = {
             name: values.name,
             grade: values.grade,
             statement: values.statement,
-            ...(selectedEditor.candidateId ? {} : { positionId: selectedEditor.positionId, mediaFileId }),
+            ...(selectedEditor.candidateId
+              ? (mediaFileId ? { mediaFileId } : {})
+              : { positionId: selectedEditor.positionId, mediaFileId }),
           };
           await api(`/api/admin/events/${selectedEditor.eventId}/contestants`, {
             method: selectedEditor.candidateId ? "PATCH" : "POST",
@@ -311,6 +330,9 @@ export function AdminConsole() {
   const ballotCount = (dashboard?.polls.reduce((sum, poll) => sum + poll.ballotCount, 0) ?? 0) +
     (dashboard?.elections.reduce((sum, election) => sum + election.ballotCount, 0) ?? 0);
   const eligibleCount = dashboard?.elections.reduce((sum, election) => sum + election.eligibleCount, 0) ?? 0;
+  const candidateCount = dashboard?.elections.reduce((sum, election) =>
+    sum + election.positions.reduce((positionSum, position) => positionSum + position.candidates.length, 0), 0) ?? 0;
+  const visibleAudit = activeView === "dashboard" ? dashboard?.audit.slice(0, 5) : dashboard?.audit;
   const resultGroups = results ? groupResultRows(results.data.results) : [];
   const eventPageSize = 6;
   const eventPageCount = Math.max(1, Math.ceil((visibleElections.length + visiblePolls.length) / eventPageSize));
@@ -339,55 +361,72 @@ export function AdminConsole() {
     window.scrollTo({ top: 0, behavior: "smooth" });
   }
 
-  if (authLoading) {
-    return <main className="admin-shell"><p className="admin-loading">Checking administrator access…</p></main>;
-  }
-
   if (!admin) {
     return (
       <main className="admin-shell admin-login-shell">
-        <section className="admin-login-card">
-          <Link className="brand admin-brand" href="/">
-            <span className="brand-mark" aria-hidden="true">Q</span>
-            <span>QURA<span className="brand-light"> Admin</span></span>
-          </Link>
-          <span className="public-overline">ADMINISTRATOR ACCESS</span>
-          <h1>Sign in to QURA</h1>
-          <p className="admin-login-description">Manage your school polls and elections.</p>
-          <form className="admin-login-form" onSubmit={handleLogin}>
-            <label className="admin-login-label" htmlFor="admin-email">Administrator email</label>
-            <input
-              id="admin-email"
-              className="text-input"
-              type="email"
-              autoComplete="username"
-              autoFocus
-              aria-describedby="admin-credential-help"
-              required
-              value={email}
-              onChange={(event) => setEmail(event.target.value)}
-            />
-            <label className="admin-login-label" htmlFor="admin-password">Password</label>
-            <input
-              id="admin-password"
-              className="text-input"
-              type="password"
-              autoComplete="current-password"
-              aria-describedby="admin-credential-help"
-              required
-              value={password}
-              onChange={(event) => setPassword(event.target.value)}
-            />
-            <button className="primary-button" disabled={busy}>
-              {busy ? "Signing in..." : "Sign in"} <span aria-hidden="true">→</span>
-            </button>
-          </form>
-          <p id="admin-credential-help" className="admin-credential-help">
-            Use the email and password created during administrator setup. First time here? See Setup step 3 in README.md.
-          </p>
-          <p className="admin-no-registration">Administrator access only. Voters do not sign in.</p>
-          {notice && <p className={`notice notice-${notice.kind}`} role="alert">{notice.text}</p>}
-        </section>
+        <div className="admin-login-layout">
+          <aside className="admin-login-aside">
+            <Link className="brand admin-brand" href="/">
+              <span className="brand-mark" aria-hidden="true">Q</span>
+              <span>QURA<span className="brand-light"> Admin</span></span>
+            </Link>
+            <div className="admin-login-message">
+              <span className="admin-login-eyebrow">VOTING, MADE CLEAR</span>
+              <h1>Make every vote count.</h1>
+              <p>A secure workspace to manage your school polls and elections.</p>
+            </div>
+            <div className="admin-login-assurance">
+              <span className="admin-login-lock" aria-hidden="true">
+                <svg viewBox="0 0 24 24" fill="none">
+                  <rect x="5" y="10" width="14" height="11" rx="2" />
+                  <path d="M8 10V7a4 4 0 1 1 8 0v3M12 14v3" />
+                </svg>
+              </span>
+              <span><strong>Private administrator access</strong><small>Voters never need an account.</small></span>
+            </div>
+          </aside>
+          <section className="admin-login-card" aria-labelledby="admin-login-title">
+            <span className="admin-login-eyebrow">ADMINISTRATOR ACCESS</span>
+            <h2 id="admin-login-title">Welcome back</h2>
+            <p className="admin-login-description">Sign in to manage your school’s voting.</p>
+            <form className="admin-login-form" onSubmit={handleLogin}>
+              <label className="admin-login-label" htmlFor="admin-email">Email address</label>
+              <input
+                id="admin-email"
+                className="text-input"
+                type="email"
+                autoComplete="username"
+                autoFocus
+                aria-describedby="admin-credential-help"
+                placeholder="admin@school.edu"
+                required
+                value={email}
+                onChange={(event) => setEmail(event.target.value)}
+              />
+              <label className="admin-login-label" htmlFor="admin-password">Password</label>
+              <input
+                id="admin-password"
+                className="text-input"
+                type="password"
+                autoComplete="current-password"
+                aria-describedby="admin-credential-help"
+                placeholder="Enter your password"
+                required
+                value={password}
+                onChange={(event) => setPassword(event.target.value)}
+              />
+              <button className="primary-button" disabled={busy}>
+                {busy ? "Signing in..." : "Sign in"}
+                <svg aria-hidden="true" viewBox="0 0 20 20" fill="none"><path d="M4 10h12m-5-5 5 5-5 5" /></svg>
+              </button>
+            </form>
+            <p id="admin-credential-help" className="admin-credential-help">
+              Use the administrator credentials created during secure setup.
+            </p>
+            {notice && <p className={`notice notice-${notice.kind}`} role="alert">{notice.text}</p>}
+            <p className="admin-login-footer">Secure access for authorized administrators only.</p>
+          </section>
+        </div>
       </main>
     );
   }
@@ -461,9 +500,30 @@ export function AdminConsole() {
 
         {activeView === "dashboard" && (
           <section className="admin-metric-grid" aria-label="Voting overview">
-            <article className="admin-metric"><span>Open events</span><strong>{openCount}</strong><small>{eventCount} total poll{eventCount === 1 ? "" : "s"} and election{eventCount === 1 ? "" : "s"}</small></article>
-            <article className="admin-metric"><span>Ballots received</span><strong>{ballotCount}</strong><small>Across all voting events</small></article>
-            <article className="admin-metric"><span>Eligible voters</span><strong>{eligibleCount}</strong><small>Formal election invitations</small></article>
+            <article className="admin-metric">
+              <span>Open events</span>
+              <span className="admin-metric-icon metric-icon-blue" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none"><rect x="4" y="5" width="16" height="15" rx="2" /><path d="M8 3v4m8-4v4M4 10h16m-11 4h3m-3 3h7" /></svg></span>
+              <strong>{openCount}</strong>
+              <small>{eventCount} total poll{eventCount === 1 ? "" : "s"} and election{eventCount === 1 ? "" : "s"}</small>
+            </article>
+            <article className="admin-metric">
+              <span>Ballots received</span>
+              <span className="admin-metric-icon metric-icon-green" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none"><path d="M5 4h14v16H5zM8 8h8m-8 4h3m-3 4h8m1-5 1.5 1.5L21 10" /></svg></span>
+              <strong>{ballotCount}</strong>
+              <small>Across all voting events</small>
+            </article>
+            <article className="admin-metric">
+              <span>Eligible voters</span>
+              <span className="admin-metric-icon metric-icon-purple" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none"><circle cx="9" cy="8" r="3" /><path d="M3 20v-1a6 6 0 0 1 12 0v1m2-11a3 3 0 0 1 0 6m1 2a5 5 0 0 1 3 4v1" /></svg></span>
+              <strong>{eligibleCount}</strong>
+              <small>Formal election invitations</small>
+            </article>
+            <article className="admin-metric">
+              <span>Contestants</span>
+              <span className="admin-metric-icon metric-icon-orange" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none"><path d="m12 3 2.8 5.7 6.2.9-4.5 4.4 1.1 6.2-5.6-3-5.6 3 1.1-6.2L3 9.6l6.2-.9L12 3Z" /></svg></span>
+              <strong>{candidateCount}</strong>
+              <small>Across all formal elections</small>
+            </article>
           </section>
         )}
 
@@ -492,7 +552,7 @@ export function AdminConsole() {
                 <label>Contestant name<input name="name" className="text-input" required minLength={2} maxLength={120} defaultValue={editor.name} /></label>
                 <label>Grade or year<input name="grade" className="text-input" maxLength={80} defaultValue={editor.grade} /></label>
                 <label>Candidate statement<textarea name="statement" className="text-input admin-textarea" maxLength={2000} defaultValue={editor.statement} /></label>
-                {!editor.candidateId && <label>Photograph (optional)<input name="photo" className="text-input" type="file" accept="image/png,image/jpeg,image/webp" /></label>}
+                <label>Photograph (optional){editor.candidateId && " — choose a new image to replace the current one"}<input name="photo" className="text-input" type="file" accept="image/png,image/jpeg,image/webp" /></label>
               </>}
               {editor.kind === "poll-question" && <>
                 <label>Question<textarea name="prompt" className="text-input admin-textarea" required minLength={2} maxLength={500} defaultValue={editor.prompt} /></label>
@@ -579,6 +639,7 @@ export function AdminConsole() {
                   <span className={`event-status event-status-${election.status}`}>{election.status}</span>
                 </div>
                 <div className="event-metrics"><span><strong>{election.eligibleCount}</strong> eligible</span><span><strong>{election.participationCount}</strong> participated</span><span><strong>{election.ballotCount}</strong> ballots</span></div>
+                {election.status !== "draft" && <p className="admin-empty">Editing is locked because this election is {election.status}. Contestants and positions can only be changed while it is a draft.</p>}
                 {election.status === "draft" && <button className="small-action" disabled={busy} onClick={() => setEditor({
                   kind: "election", id: election.id, title: election.title, description: election.description,
                 })}>Edit election details</button>}
@@ -638,7 +699,7 @@ export function AdminConsole() {
                         const response = await fetch(`/api/admin/events/${election.id}/eligibility`, { method: "POST", body: form });
                         if (!response.ok) {
                           const result = await response.json() as { message?: string };
-                          throw new Error(result.message ?? "Eligibility import failed.");
+                          throw new AdminApiError(result.message ?? "Eligibility import failed.", response.status);
                         }
                         const blob = await response.blob();
                         const url = URL.createObjectURL(blob);
@@ -798,9 +859,12 @@ export function AdminConsole() {
         </section>}
 
         {(activeView === "dashboard" || activeView === "activity") && <section className="admin-panel audit-panel" id="audit-log">
-          <div className="admin-panel-heading"><div><span className="public-overline">ACTIVITY</span><h2>{activeView === "dashboard" ? "Recent activity" : "Administrator audit log"}</h2></div></div>
-          {!dashboard?.audit.length ? <div className="admin-empty-state"><span className="admin-empty-symbol" aria-hidden="true">A</span><strong>No activity recorded</strong><p>Administrator actions will appear here.</p></div> :
-            <div className="audit-list">{dashboard.audit.map((entry) => <div className="audit-row" key={entry.id}><span>{entry.action.replaceAll(".", " ")}</span><time>{new Date(entry.created_at).toLocaleString()}</time></div>)}</div>}
+          <div className="admin-panel-heading">
+            <div><span className="public-overline">ACTIVITY</span><h2>{activeView === "dashboard" ? "Recent activity" : "Administrator audit log"}</h2></div>
+            {activeView === "dashboard" && dashboard?.audit.length ? <button className="quiet-button" type="button" onClick={() => navigate("activity")}>View all</button> : null}
+          </div>
+          {!visibleAudit?.length ? <div className="admin-empty-state"><span className="admin-empty-symbol" aria-hidden="true">A</span><strong>No activity recorded</strong><p>Administrator actions will appear here.</p></div> :
+            <div className="audit-list">{visibleAudit.map((entry) => <div className="audit-row" key={entry.id}><span>{entry.action.replaceAll(".", " ")}</span><time>{new Date(entry.created_at).toLocaleString()}</time></div>)}</div>}
         </section>}
         </section>
       </div>
