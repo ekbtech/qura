@@ -69,8 +69,11 @@ export async function PATCH(request: Request, context: Context) {
         if (positionError || eligibilityError || invitationError) {
           return NextResponse.json({ message: "Could not verify election readiness." }, { status: 503 });
         }
-        if (!positions.length || !eligibleCount || !invitationCount) {
-          return NextResponse.json({ message: "Add election positions and import eligible voters to generate invitations before opening." }, { status: 409 });
+        if (!positions.length) {
+          return NextResponse.json({ message: "Add at least one election position before opening." }, { status: 409 });
+        }
+        if (!eligibleCount || !invitationCount) {
+          return NextResponse.json({ message: "Import eligible voters using the CSV to generate invitation links before opening." }, { status: 409 });
         }
         const { data: candidates, error: candidateError } = await supabase.from("candidates")
           .select("position_id").in("position_id", positions.map((position) => position.id));

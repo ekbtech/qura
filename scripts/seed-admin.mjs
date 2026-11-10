@@ -7,9 +7,9 @@ const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
 const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
 if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) ||
-    !password || password.length < 14 || password.length > 256 ||
+    !password || password.length < 6 || password.length > 256 ||
     !supabaseUrl || !serviceRoleKey) {
-  console.error("Set QURA_ADMIN_EMAIL, QURA_ADMIN_PASSWORD (14+ characters), NEXT_PUBLIC_SUPABASE_URL, and SUPABASE_SERVICE_ROLE_KEY.");
+  console.error("Set QURA_ADMIN_EMAIL, QURA_ADMIN_PASSWORD (6-256 characters), NEXT_PUBLIC_SUPABASE_URL, and SUPABASE_SERVICE_ROLE_KEY.");
   process.exitCode = 1;
 } else {
   const supabase = createClient(supabaseUrl, serviceRoleKey, {

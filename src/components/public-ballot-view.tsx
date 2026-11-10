@@ -2,7 +2,6 @@
 
 import Image from "next/image";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
 import { Turnstile } from "@marsidev/react-turnstile";
 import { useEffect, useMemo, useState } from "react";
 import type { PublicBallot } from "@/lib/public-ballot";
@@ -28,11 +27,9 @@ function groupPublicResults(rows: PublicResults["results"]) {
 }
 
 export function PublicBallotView({ token, ballot }: Props) {
-  const router = useRouter();
   const [sessionStarted, setSessionStarted] = useState(false);
   const [busy, setBusy] = useState(false);
   const [hasVoted, setHasVoted] = useState(false);
-  const [verificationCode, setVerificationCode] = useState("");
   const [reviewing, setReviewing] = useState(false);
   const [selections, setSelections] = useState<Record<string, string[]>>({});
   const [captchaToken, setCaptchaToken] = useState("");
@@ -84,31 +81,6 @@ export function PublicBallotView({ token, ballot }: Props) {
             : selected;
       return { ...current, [groupId]: next };
     });
-  }
-
-  async function verifyEligibility(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    setBusy(true);
-    setNotice(null);
-    try {
-      const response = await fetch("/api/public/verify", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ token, code: verificationCode }),
-      });
-      const result = await response.json() as { message?: string };
-      if (!response.ok) {
-        setNotice({ kind: "error", text: result.message ?? "That voting code could not be verified." });
-        return;
-      }
-      setVerificationCode("");
-      setNotice({ kind: "success", text: "Eligibility verified. Your ballot is ready." });
-      router.refresh();
-    } catch {
-      setNotice({ kind: "error", text: "Verification is temporarily unavailable. Please try again." });
-    } finally {
-      setBusy(false);
-    }
   }
 
   async function submit(event: FormEvent<HTMLFormElement>) {
@@ -218,26 +190,12 @@ export function PublicBallotView({ token, ballot }: Props) {
                 {publicResults && <PublicResultTable results={publicResults} />}
               </section>
             ) : ballot.eventType === "election" && !ballot.eligibleVerified ? (
-              <form className="public-card public-verify-card" onSubmit={(event) => void verifyEligibility(event)}>
-                <span className="public-overline">STEP 1 · VERIFY ELIGIBILITY</span>
-                <h2>Enter your voting code</h2>
-                <p>Your unique code confirms you are eligible for this election. It is not stored with your ballot.</p>
-                <label htmlFor="voter-code">Unique voting code</label>
-                <input
-                  id="voter-code"
-                  className="text-input"
-                  autoComplete="one-time-code"
-                  maxLength={100}
-                  required
-                  value={verificationCode}
-                  onChange={(event) => setVerificationCode(event.target.value)}
-                  placeholder="Enter the code from your invitation"
-                />
-                <button className="primary-button" disabled={busy || verificationCode.trim().length < 2}>
-                  {busy ? "Verifying…" : "Verify and continue"} <span aria-hidden="true">→</span>
-                </button>
-                <p className="public-privacy">Your code is only used to verify eligibility.</p>
-              </form>
+              <section className="public-card public-verify-card">
+                <span className="public-overline">VOTER VERIFICATION</span>
+                <h2>Verify with your school email</h2>
+                <p>Use the shared election link to enter your school registration number and receive a one-time code at your registered email address.</p>
+                <Link className="primary-button" href={`/election/${ballot.eventId}`}>Continue to email verification <span aria-hidden="true">→</span></Link>
+              </section>
             ) : (
               <form className="public-card public-ballot-form" onSubmit={submit}>
                 <div className="public-form-heading">

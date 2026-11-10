@@ -9,6 +9,7 @@ import {
   verifyPassword,
 } from "@/lib/qura-security";
 import { requestAddress, sameOriginRequest } from "@/lib/admin-session";
+import { getPlatformSettings } from "@/lib/platform-settings";
 
 export async function POST(request: Request) {
   if (!sameOriginRequest(request)) {
@@ -26,8 +27,8 @@ export async function POST(request: Request) {
   }
   const body = parsed as { email?: unknown; password?: unknown };
   if (typeof body.email !== "string" || typeof body.password !== "string" ||
-      body.email.length > 254 || body.password.length > 256) {
-    return NextResponse.json({ message: "Enter your administrator email and password." }, { status: 400 });
+      body.email.length > 254 || body.password.length < 6 || body.password.length > 256) {
+    return NextResponse.json({ message: "Enter your administrator email and a password of at least 6 characters." }, { status: 400 });
   }
 
   const supabase = createAdminSupabase();
@@ -62,11 +63,18 @@ export async function POST(request: Request) {
     return NextResponse.json({ message: "Email or password is incorrect." }, { status: 401 });
   }
 
+  let settings;
+  try {
+    settings = await getPlatformSettings();
+  } catch (settingsError) {
+    console.error("Administrator session settings lookup failed:", settingsError);
+    return NextResponse.json({ message: "Could not load administrator session settings." }, { status: 503 });
+  }
   const token = createOpaqueToken();
   const { error: sessionError } = await supabase.from("admin_sessions").insert({
     admin_id: admin.id,
     token_hash: hashToken(token),
-    expires_at: adminSessionExpiry(),
+    expires_at: adminSessionExpiry(settings.sessionTimeoutHours),
   });
   if (sessionError) {
     console.error("Administrator session creation failed:", sessionError.message);
@@ -75,6 +83,6 @@ export async function POST(request: Request) {
 
   return NextResponse.json(
     { admin: { id: admin.id, email: admin.email } },
-    { headers: { "Set-Cookie": createAdminCookie(token) } },
+    { headers: { "Set-Cookie": createAdminCookie(token, settings.sessionTimeoutHours * 60 * 60) } },
   );
 }

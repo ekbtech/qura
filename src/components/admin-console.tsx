@@ -5,6 +5,7 @@ import QRCode from "qrcode";
 import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
 import type { FormEvent, ReactNode } from "react";
+import { DEFAULT_PLATFORM_SETTINGS, type PlatformSettings } from "@/lib/platform-settings.types";
 
 type Admin = { id: string; email: string };
 class AdminApiError extends Error {
@@ -36,9 +37,11 @@ type Poll = {
 };
 type Audit = { id: string; action: string; created_at: string; event_type: string | null; details: Record<string, unknown> };
 type DashboardData = { polls: Poll[]; elections: Election[]; audit: Audit[] };
+type Voter = { id: string; email: string | null; is_active: boolean; created_at: string };
+type VoterPage = { election: { id: string; title: string }; voters: Voter[]; total: number; page: number; pageSize: number };
 type Notice = { kind: "success" | "error"; text: string };
 type Results = { event: { title: string; status: string; resultsPublic: boolean }; ballots: number; participation: number; results: { label: string; count: number; category?: string }[] };
-type AdminView = "dashboard" | "polls" | "elections" | "contestants" | "links" | "results" | "reports" | "settings" | "activity";
+type AdminView = "dashboard" | "polls" | "elections" | "contestants" | "voters" | "links" | "results" | "reports" | "settings" | "activity";
 type Editor =
   | { kind: "election"; id: string; title: string; description: string }
   | { kind: "position"; eventId: string; positionId: string; title: string; minSelections: number; maxSelections: number }
@@ -46,7 +49,7 @@ type Editor =
   | { kind: "candidate"; eventId: string; positionId: string; candidateId?: string; name: string; grade: string; statement: string }
   | { kind: "poll"; id: string; title: string; description: string }
   | { kind: "poll-question"; pollId: string; questionId: string; prompt: string; options: string; maxSelections: number };
-type Confirmation = { message: string; successText: string; action: () => Promise<void> };
+type Confirmation = { message: string; successText: string; action: () => Promise<void>; error?: string };
 
 function groupResultRows(rows: Results["results"]) {
   const grouped = new Map<string, { label: string; count: number }[]>();
@@ -68,6 +71,7 @@ const adminNavigation: { id: AdminView; label: string }[] = [
   { id: "polls", label: "Polls" },
   { id: "elections", label: "Elections" },
   { id: "contestants", label: "Contestants" },
+  { id: "voters", label: "Voters" },
   { id: "links", label: "Voting links" },
   { id: "results", label: "Results" },
   { id: "reports", label: "Reports" },
@@ -81,6 +85,7 @@ function NavigationIcon({ view }: { view: AdminView }) {
     polls: <><path d="M5 5h14M5 10h14M5 15h9" /><circle cx="18" cy="17" r="2" /></>,
     elections: <><path d="M12 3 19 6v5c0 4.5-3 7.5-7 10-4-2.5-7-5.5-7-10V6l7-3Z" /><path d="m9 12 2 2 4-4" /></>,
     contestants: <><circle cx="9" cy="8" r="3" /><path d="M3 20v-1a6 6 0 0 1 12 0v1M16 5.2a3 3 0 0 1 0 5.6M18 14a5 5 0 0 1 3 4.5V20" /></>,
+    voters: <><circle cx="9" cy="8" r="3" /><path d="M3 20v-1a6 6 0 0 1 12 0v1m2-10h4m-2-2v4" /></>,
     links: <><path d="M10 13a5 5 0 0 0 7.1 0l2-2a5 5 0 0 0-7.1-7.1l-1.1 1.1" /><path d="M14 11a5 5 0 0 0-7.1 0l-2 2A5 5 0 0 0 12 20l1.1-1.1" /></>,
     results: <><path d="M4 20V10M10 20V4M16 20v-7M22 20H2" /></>,
     reports: <><path d="M7 3h7l5 5v13H7z" /><path d="M14 3v6h6M10 13h6M10 17h6" /></>,
@@ -95,6 +100,7 @@ const viewCopy: Record<AdminView, { title: string; subtitle: string }> = {
   polls: { title: "Polls", subtitle: "Create and manage public polls." },
   elections: { title: "Elections", subtitle: "Manage formal elections and eligibility." },
   contestants: { title: "Contestants", subtitle: "Update candidate profiles before voting opens." },
+  voters: { title: "Voters", subtitle: "Review eligible voters and add them to draft elections." },
   links: { title: "Voting links", subtitle: "Prepare and distribute voter access links." },
   results: { title: "Results", subtitle: "Review results from closed voting events." },
   reports: { title: "Reports", subtitle: "Review and export closed-event results." },
@@ -102,16 +108,60 @@ const viewCopy: Record<AdminView, { title: string; subtitle: string }> = {
   activity: { title: "Audit log", subtitle: "Recent administrator actions." },
 };
 
-const defaultOpen = () => {
-  const date = new Date(Date.now() + 60 * 60 * 1000);
-  date.setMinutes(0, 0, 0);
-  return localDateTime(date);
+const defaultOpen = (timeZone: string) => {
+  const date = new Date();
+  date.setHours(date.getHours() + 1, 0, 0, 0);
+  return dateTimeInZone(date, timeZone);
 };
-const defaultClose = () => localDateTime(new Date(Date.now() + 24 * 60 * 60 * 1000));
-function localDateTime(date: Date) {
-  const offset = date.getTimezoneOffset() * 60_000;
-  return new Date(date.getTime() - offset).toISOString().slice(0, 16);
+const defaultClose = (timeZone: string, durationHours: number) => {
+  const date = new Date();
+  date.setHours(date.getHours() + 1 + durationHours, 0, 0, 0);
+  return dateTimeInZone(date, timeZone);
+};
+function dateTimeInZone(date: Date, timeZone: string): string {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone, year: "numeric", month: "2-digit", day: "2-digit",
+    hour: "2-digit", minute: "2-digit", hourCycle: "h23",
+  }).formatToParts(date);
+  const part = (type: Intl.DateTimeFormatPartTypes) => parts.find((item) => item.type === type)?.value ?? "";
+  return `${part("year")}-${part("month")}-${part("day")}T${part("hour")}:${part("minute")}`;
 }
+function instantFromZonedDateTime(value: string, timeZone: string): string {
+  const [date, time] = value.split("T");
+  const [year, month, day] = date.split("-").map(Number);
+  const [hour, minute] = time.split(":").map(Number);
+  const target = Date.UTC(year, month - 1, day, hour, minute);
+  let timestamp = target;
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    const parts = new Intl.DateTimeFormat("en-US", {
+      timeZone, year: "numeric", month: "2-digit", day: "2-digit",
+      hour: "2-digit", minute: "2-digit", hourCycle: "h23",
+    }).formatToParts(new Date(timestamp));
+    const part = (type: Intl.DateTimeFormatPartTypes) => Number(parts.find((item) => item.type === type)?.value);
+    const displayed = Date.UTC(part("year"), part("month") - 1, part("day"), part("hour"), part("minute"));
+    timestamp += target - displayed;
+  }
+  return new Date(timestamp).toISOString();
+}
+function formatDateTime(value: string, settings: PlatformSettings): string {
+  return new Intl.DateTimeFormat(settings.language === "sw" ? "sw-KE" : "en-KE", {
+    dateStyle: "medium", timeStyle: "short", timeZone: settings.timeZone,
+  }).format(new Date(value));
+}
+
+const navigationLabels: Record<PlatformSettings["language"], Partial<Record<AdminView, string>>> = {
+  en: {},
+  sw: {
+    dashboard: "Dashibodi", polls: "Kura za maoni", elections: "Chaguzi", contestants: "Wagombea",
+    voters: "Wapiga kura", links: "Viungo vya kupiga kura", results: "Matokeo", reports: "Ripoti",
+    settings: "Mipangilio", activity: "Kumbukumbu ya ukaguzi",
+  },
+};
+const supportedTimeZones = [
+  "Africa/Nairobi", "Africa/Dar_es_Salaam", "Africa/Kampala", "Africa/Lagos",
+  "UTC", "Europe/London", "Europe/Paris", "Asia/Kolkata", "Asia/Dubai",
+  "America/New_York", "America/Los_Angeles",
+];
 
 async function api<T>(url: string, init?: RequestInit): Promise<T> {
   const response = await fetch(url, { ...init, cache: "no-store" });
@@ -131,9 +181,11 @@ export function AdminConsole() {
   const [notice, setNotice] = useState<Notice | null>(null);
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [showPassword, setShowPassword] = useState(false);
   const [eventType, setEventType] = useState<"poll" | "election">("election");
   const [link, setLink] = useState("");
   const [qr, setQr] = useState("");
+  const [electionShare, setElectionShare] = useState<{ id: string; url: string } | null>(null);
   const [results, setResults] = useState<{ id: string; type: string; data: Results } | null>(null);
   const [editor, setEditor] = useState<Editor | null>(null);
   const [confirmation, setConfirmation] = useState<Confirmation | null>(null);
@@ -142,8 +194,23 @@ export function AdminConsole() {
   const [statusFilter, setStatusFilter] = useState("all");
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [eventPage, setEventPage] = useState(1);
+  const [settings, setSettings] = useState<PlatformSettings>(DEFAULT_PLATFORM_SETTINGS);
+  const [settingsLoading, setSettingsLoading] = useState(false);
+  const [settingsLoadError, setSettingsLoadError] = useState<string | null>(null);
+  const [selectedElectionId, setSelectedElectionId] = useState("");
+  const [voterPageNumber, setVoterPageNumber] = useState(1);
+  const [voterData, setVoterData] = useState<VoterPage | null>(null);
+  const [votersLoading, setVotersLoading] = useState(false);
+  const [voterSearch, setVoterSearch] = useState("");
+  const [currentPassword, setCurrentPassword] = useState("");
+  const [newPassword, setNewPassword] = useState("");
+  const [confirmNewPassword, setConfirmNewPassword] = useState("");
+  const elections = dashboard?.elections ?? [];
+  const activeElectionId = elections.some((election) => election.id === selectedElectionId)
+    ? selectedElectionId
+    : (elections.find((election) => election.status === "draft") ?? elections[0])?.id ?? "";
 
-  function showActionError(error: unknown, fallback: string) {
+  const showActionError = useCallback((error: unknown, fallback: string) => {
     if (error instanceof AdminApiError && error.status === 401) {
       setAdmin(null);
       setDashboard(null);
@@ -153,7 +220,7 @@ export function AdminConsole() {
       return;
     }
     setNotice({ kind: "error", text: error instanceof Error ? error.message : fallback });
-  }
+  }, []);
 
   const loadDashboard = useCallback(async () => {
     setDashboardLoading(true);
@@ -169,11 +236,44 @@ export function AdminConsole() {
     }
   }, []);
 
+  const loadSettings = useCallback(async () => {
+    setSettingsLoading(true);
+    setSettingsLoadError(null);
+    try {
+      const result = await api<{ settings: PlatformSettings }>("/api/admin/settings");
+      setSettings(result.settings);
+    } catch (error) {
+      setSettingsLoadError(error instanceof Error ? error.message : "Could not load platform settings.");
+      throw error;
+    } finally {
+      setSettingsLoading(false);
+    }
+  }, []);
+
+  const loadVoters = useCallback(async () => {
+    if (!activeElectionId) {
+      setVoterData(null);
+      return;
+    }
+    setVotersLoading(true);
+    try {
+      const result = await api<VoterPage>(`/api/admin/events/${activeElectionId}/eligibility?page=${voterPageNumber}`);
+      setVoterData(result);
+    } finally {
+      setVotersLoading(false);
+    }
+  }, [activeElectionId, voterPageNumber]);
+
   useEffect(() => {
     api<{ admin: Admin | null }>("/api/admin/session", { signal: AbortSignal.timeout(15000) })
       .then(({ admin: activeAdmin }) => {
         setAdmin(activeAdmin);
-        if (activeAdmin) void loadDashboard().catch(() => {});
+        if (activeAdmin) {
+          void loadDashboard().catch(() => {});
+          void loadSettings().catch((error: unknown) => setNotice({
+            kind: "error", text: error instanceof Error ? error.message : "Could not load platform settings.",
+          }));
+        }
       })
       .catch((error: unknown) => setNotice({
         kind: "error",
@@ -181,7 +281,29 @@ export function AdminConsole() {
           ? "Administrator session check timed out. Please sign in or refresh the page."
           : error instanceof Error ? error.message : "Could not check administrator session.",
       }));
-  }, [loadDashboard]);
+  }, [loadDashboard, loadSettings]);
+
+  useEffect(() => {
+    if (activeView !== "voters" || !admin || !activeElectionId) return;
+    let active = true;
+    const timer = window.setTimeout(() => {
+      setVotersLoading(true);
+      void api<VoterPage>(`/api/admin/events/${activeElectionId}/eligibility?page=${voterPageNumber}`)
+        .then((result) => {
+          if (active) setVoterData(result);
+        })
+        .catch((error: unknown) => {
+          if (active) showActionError(error, "Could not load voters.");
+        })
+        .finally(() => {
+          if (active) setVotersLoading(false);
+        });
+    }, 0);
+    return () => {
+      active = false;
+      window.clearTimeout(timer);
+    };
+  }, [activeView, activeElectionId, admin, voterPageNumber, showActionError]);
 
   async function handleLogin(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -193,7 +315,7 @@ export function AdminConsole() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ email, password }),
       });
-      await loadDashboard();
+      await Promise.all([loadDashboard(), loadSettings()]);
       setAdmin(result.admin);
       setPassword("");
     } catch (error) {
@@ -218,6 +340,19 @@ export function AdminConsole() {
     }
   }
 
+  async function copyElectionLink(electionId: string) {
+    const url = new URL(`/election/${electionId}`, window.location.origin).toString();
+    setElectionShare({ id: electionId, url });
+    try {
+      await navigator.clipboard.writeText(url);
+      setNotice({ kind: "success", text: settings.emailVerificationEnabled
+        ? "Shared election link copied. Voters will verify with their registration number and email code."
+        : "Shared election link copied. Eligible voters can continue with their registration number." });
+    } catch {
+      window.prompt("Copy this shared election link for voters:", url);
+    }
+  }
+
   async function runAction(action: () => Promise<void>, successText?: string) {
     setEventPage(1);
     setBusy(true);
@@ -228,6 +363,36 @@ export function AdminConsole() {
       if (successText) setNotice({ kind: "success", text: successText });
     } catch (error) {
       showActionError(error, "Action failed.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function confirmAction() {
+    if (!confirmation) return;
+    const selected = confirmation;
+    setBusy(true);
+    setNotice(null);
+    setConfirmation({ ...selected, error: undefined });
+    try {
+      await selected.action();
+    } catch (error) {
+      if (error instanceof AdminApiError && error.status === 401) {
+        showActionError(error, "Action failed.");
+      } else {
+        const message = error instanceof Error ? error.message : "Action failed.";
+        setConfirmation({ ...selected, error: message });
+      }
+      setBusy(false);
+      return;
+    }
+
+    setConfirmation(null);
+    try {
+      await loadDashboard();
+      setNotice({ kind: "success", text: selected.successText });
+    } catch (error) {
+      showActionError(error, "Action succeeded, but the dashboard could not be refreshed.");
     } finally {
       setBusy(false);
     }
@@ -258,7 +423,12 @@ export function AdminConsole() {
           });
         } else if (selectedEditor.kind === "new-position") {
           await api(`/api/admin/events/${selectedEditor.eventId}/positions`, {
-            method: "POST", headers: jsonHeaders, body: JSON.stringify({ title: values.title }),
+            method: "POST", headers: jsonHeaders,
+            body: JSON.stringify({
+              title: values.title,
+              minSelections: Number(values.minSelections),
+              maxSelections: Number(values.maxSelections),
+            }),
           });
         } else if (selectedEditor.kind === "candidate") {
           let mediaFileId: string | null = null;
@@ -310,7 +480,7 @@ export function AdminConsole() {
   const normalizedSearch = searchQuery.trim().toLowerCase();
   const visibleElections = (dashboard?.elections ?? []).filter((election) => {
     const matchesView = activeView === "dashboard" || activeView === "elections" ||
-      (activeView === "contestants" && election.positions.some((position) => position.candidates.length > 0)) ||
+      (activeView === "contestants" && election.positions.length > 0) ||
       (activeView === "links" && election.status === "open" && election.eligibleCount > 0) ||
       ((activeView === "results" || activeView === "reports") && election.status === "closed");
     const matchesStatus = statusFilter === "all" || election.status === statusFilter;
@@ -333,6 +503,7 @@ export function AdminConsole() {
   const candidateCount = dashboard?.elections.reduce((sum, election) =>
     sum + election.positions.reduce((positionSum, position) => positionSum + position.candidates.length, 0), 0) ?? 0;
   const visibleAudit = activeView === "dashboard" ? dashboard?.audit.slice(0, 5) : dashboard?.audit;
+  const viewTitle = navigationLabels[settings.language][activeView] ?? viewCopy[activeView].title;
   const resultGroups = results ? groupResultRows(results.data.results) : [];
   const eventPageSize = 6;
   const eventPageCount = Math.max(1, Math.ceil((visibleElections.length + visiblePolls.length) / eventPageSize));
@@ -350,15 +521,97 @@ export function AdminConsole() {
     return () => window.cancelAnimationFrame(frame);
   }, [results]);
 
+  useEffect(() => {
+    if (!editor) return;
+    const frame = window.requestAnimationFrame(() => {
+      document.getElementById("admin-editor")?.scrollIntoView({ behavior: "smooth", block: "start" });
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [editor]);
+
   function navigate(view: AdminView) {
     setActiveView(view);
     setSearchQuery("");
+    setVoterSearch("");
     setStatusFilter("all");
     setEventPage(1);
+    setVoterPageNumber(1);
     if (view === "polls") setEventType("poll");
     if (view === "elections") setEventType("election");
     setSidebarOpen(false);
     window.scrollTo({ top: 0, behavior: "smooth" });
+  }
+
+  async function addVoter(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!activeElectionId) return;
+    const formElement = event.currentTarget;
+    const form = new FormData(formElement);
+    setBusy(true);
+    setNotice(null);
+    try {
+      await api(`/api/admin/events/${activeElectionId}/eligibility`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          registrationNumber: form.get("registrationNumber"),
+          email: form.get("email"),
+        }),
+      });
+      formElement.reset();
+      await Promise.all([loadDashboard(), loadVoters()]);
+      setNotice({ kind: "success", text: "Eligible voter added." });
+    } catch (error) {
+      showActionError(error, "Could not add eligible voter.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function saveSettings(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setBusy(true);
+    setNotice(null);
+    try {
+      const result = await api<{ settings: PlatformSettings; warning?: string }>("/api/admin/settings", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(settings),
+      });
+      setSettings(result.settings);
+      setSettingsLoadError(null);
+      setNotice({ kind: "success", text: result.warning ?? "Settings saved. Session timeout changes apply at your next sign-in." });
+    } catch (error) {
+      showActionError(error, "Could not save settings.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function changeAdminPassword(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (newPassword !== confirmNewPassword) {
+      setNotice({ kind: "error", text: "The new passwords do not match." });
+      return;
+    }
+    setBusy(true);
+    setNotice(null);
+    try {
+      await api("/api/admin/password", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ currentPassword, newPassword }),
+      });
+      setCurrentPassword("");
+      setNewPassword("");
+      setConfirmNewPassword("");
+      setNotice({ kind: "success", text: "Password changed. Sign in again with your new password." });
+      await logout();
+    } catch (error) {
+      showActionError(error, "Could not change the administrator password.");
+    } finally {
+      setBusy(false);
+    }
   }
 
   if (!admin) {
@@ -404,17 +657,30 @@ export function AdminConsole() {
                 onChange={(event) => setEmail(event.target.value)}
               />
               <label className="admin-login-label" htmlFor="admin-password">Password</label>
-              <input
-                id="admin-password"
-                className="text-input"
-                type="password"
-                autoComplete="current-password"
-                aria-describedby="admin-credential-help"
-                placeholder="Enter your password"
-                required
-                value={password}
-                onChange={(event) => setPassword(event.target.value)}
-              />
+              <div className="admin-password-field">
+                <input
+                  id="admin-password"
+                  className="text-input"
+                  type={showPassword ? "text" : "password"}
+                  autoComplete="current-password"
+                  aria-describedby="admin-credential-help"
+                  placeholder="Enter your password"
+                  required
+                  minLength={6}
+                  value={password}
+                  onChange={(event) => setPassword(event.target.value)}
+                />
+                <button
+                  className="admin-password-toggle"
+                  type="button"
+                  aria-controls="admin-password"
+                  aria-label={showPassword ? "Hide password" : "Show password"}
+                  aria-pressed={showPassword}
+                  onClick={() => setShowPassword((visible) => !visible)}
+                >
+                  {showPassword ? "Hide" : "Show"}
+                </button>
+              </div>
               <button className="primary-button" disabled={busy}>
                 {busy ? "Signing in..." : "Sign in"}
                 <svg aria-hidden="true" viewBox="0 0 20 20" fill="none"><path d="M4 10h12m-5-5 5 5-5 5" /></svg>
@@ -432,12 +698,12 @@ export function AdminConsole() {
   }
 
   return (
-    <main className="admin-workspace">
+    <main className="admin-workspace" data-theme={settings.theme} lang={settings.language}>
       {sidebarOpen && <button className="admin-sidebar-backdrop" aria-label="Close navigation" onClick={() => setSidebarOpen(false)} />}
       <aside className={`admin-sidebar${sidebarOpen ? " admin-sidebar-open" : ""}`}>
         <Link className="brand admin-workspace-brand" href="/">
           <span className="brand-mark" aria-hidden="true">Q</span>
-          <span>QURA<span className="brand-light"> Admin</span></span>
+          <span>{settings.schoolName}<span className="brand-light"> Admin</span></span>
         </Link>
         <span className="admin-nav-caption">WORKSPACE</span>
         <nav className="admin-nav" aria-label="Administrator navigation">
@@ -446,6 +712,7 @@ export function AdminConsole() {
               : item.id === "elections" ? dashboard?.elections.length
                 : item.id === "contestants"
                   ? dashboard?.elections.reduce((total, election) => total + election.positions.reduce((subtotal, position) => subtotal + position.candidates.length, 0), 0)
+                  : item.id === "voters" ? eligibleCount
                   : undefined;
             return (
               <button
@@ -456,7 +723,7 @@ export function AdminConsole() {
                 onClick={() => navigate(item.id)}
               >
                 <span className="admin-nav-marker"><NavigationIcon view={item.id} /></span>
-                <span>{item.label}</span>
+                <span>{navigationLabels[settings.language][item.id] ?? item.label}</span>
                 {count !== undefined && <span className="admin-nav-count">{count}</span>}
               </button>
             );
@@ -470,7 +737,7 @@ export function AdminConsole() {
       <div className="admin-main-area">
         <header className="admin-topbar">
           <button className="admin-menu-toggle" type="button" aria-label="Open navigation" onClick={() => setSidebarOpen(true)}>Menu</button>
-          <div className="admin-breadcrumb"><span>QURA</span><span aria-hidden="true">/</span><strong>{viewCopy[activeView].title}</strong></div>
+          <div className="admin-breadcrumb"><span>{settings.schoolName}</span><span aria-hidden="true">/</span><strong>{viewTitle}</strong></div>
           <div className="admin-topbar-right">
             <span className="admin-topbar-email">{admin.email}</span>
             <button className="quiet-button" disabled={busy} onClick={logout}>Sign out</button>
@@ -478,7 +745,7 @@ export function AdminConsole() {
         </header>
         <section className="admin-dashboard">
         <div className="admin-welcome">
-          <div><span className="public-overline">ADMIN WORKSPACE</span><h1>{viewCopy[activeView].title}</h1><p>{viewCopy[activeView].subtitle}</p></div>
+          <div><span className="public-overline">ADMIN WORKSPACE</span><h1>{viewTitle}</h1><p>{viewCopy[activeView].subtitle}</p></div>
           <div className="admin-welcome-actions">
             <span className="admin-secure-pill"><span className="secure-dot" /> Secure session</span>
             {(activeView === "dashboard" || activeView === "polls" || activeView === "elections") &&
@@ -487,16 +754,22 @@ export function AdminConsole() {
               </button>}
           </div>
         </div>
-        {notice && <p className={`notice notice-${notice.kind}`} role={notice.kind === "error" ? "alert" : "status"}>{notice.text}</p>}
-        {confirmation && <section className="admin-confirmation" role="alert">
-          <p>{confirmation.message}</p>
-          <button className="small-action danger-action" disabled={busy} onClick={() => {
-            const selected = confirmation;
-            setConfirmation(null);
-            void runAction(selected.action, selected.successText);
-          }}>Confirm</button>
-          <button className="small-action" disabled={busy} onClick={() => setConfirmation(null)}>Keep</button>
-        </section>}
+        {notice?.kind === "success" && <p className="notice notice-success" role="status">{notice.text}</p>}
+        {notice?.kind === "error" && <div className="admin-confirmation-overlay">
+          <section className="admin-error-dialog" role="alertdialog" aria-modal="true" aria-labelledby="admin-error-title" aria-describedby="admin-error-message">
+            <h2 id="admin-error-title">Action could not be completed</h2>
+            <p id="admin-error-message" role="alert">{notice.text}</p>
+            <button className="small-action" type="button" onClick={() => setNotice(null)}>Close</button>
+          </section>
+        </div>}
+        {confirmation && <div className="admin-confirmation-overlay">
+          <section className="admin-confirmation" id="admin-confirmation" role="alertdialog" aria-modal="true" aria-labelledby="admin-confirmation-message">
+            <p id="admin-confirmation-message">{confirmation.message}</p>
+            {confirmation.error && <p className="notice notice-error admin-confirmation-error" role="alert">{confirmation.error}</p>}
+            <button className="small-action danger-action" type="button" disabled={busy} onClick={() => void confirmAction()}>Confirm</button>
+            <button className="small-action" type="button" disabled={busy} onClick={() => setConfirmation(null)}>Keep</button>
+          </section>
+        </div>}
 
         {activeView === "dashboard" && (
           <section className="admin-metric-grid" aria-label="Voting overview">
@@ -517,6 +790,7 @@ export function AdminConsole() {
               <span className="admin-metric-icon metric-icon-purple" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none"><circle cx="9" cy="8" r="3" /><path d="M3 20v-1a6 6 0 0 1 12 0v1m2-11a3 3 0 0 1 0 6m1 2a5 5 0 0 1 3 4v1" /></svg></span>
               <strong>{eligibleCount}</strong>
               <small>Formal election invitations</small>
+              <button className="admin-metric-action" type="button" onClick={() => navigate("voters")}>View voter list <span aria-hidden="true">→</span></button>
             </article>
             <article className="admin-metric">
               <span>Contestants</span>
@@ -527,7 +801,68 @@ export function AdminConsole() {
           </section>
         )}
 
-        {editor && <section className="admin-panel admin-editor">
+        {activeView === "voters" && <section className="admin-panel admin-voters-panel">
+          <div className="admin-panel-heading">
+            <div><span className="public-overline">ELIGIBILITY</span><h2>Voter directory</h2><p>Select an election to review and add eligible voters.</p></div>
+            <button className="quiet-button" type="button" disabled={votersLoading || !activeElectionId} onClick={() => void loadVoters().catch((error: unknown) => showActionError(error, "Could not load voters."))}>Refresh voters</button>
+          </div>
+          {!dashboard && dashboardLoading
+            ? <p>Loading elections…</p>
+            : !dashboard && dashboardError
+              ? <div className="admin-empty-state"><strong>Could not load elections</strong><p>{dashboardError}</p><button className="small-action" type="button" onClick={() => void loadDashboard().catch(() => {})}>Retry</button></div>
+              : !dashboard?.elections.length
+            ? <div className="admin-empty-state"><strong>No elections yet</strong><p>Create an election first, then add its eligible voters here.</p><button className="small-action primary-small" type="button" onClick={() => navigate("elections")}>Go to elections</button></div>
+            : <>
+              <label className="admin-election-picker">Election
+                <select value={activeElectionId} onChange={(event) => {
+                  setSelectedElectionId(event.target.value);
+                  setVoterPageNumber(1);
+                  setVoterData(null);
+                }}>
+                  {dashboard.elections.map((election) => <option key={election.id} value={election.id}>{election.title} · {election.status}</option>)}
+                </select>
+              </label>
+              {(() => {
+                const selectedElection = dashboard.elections.find((election) => election.id === activeElectionId);
+                const showingData = voterData?.election.id === activeElectionId ? voterData : null;
+                const filteredVoters = (showingData?.voters ?? []).filter((voter) =>
+                  !voterSearch.trim() || (voter.email ?? "").toLowerCase().includes(voterSearch.trim().toLowerCase()));
+                return <>
+                  {selectedElection?.status === "draft" && <form className="eligibility-add-form voter-directory-add" onSubmit={(event) => void addVoter(event)}>
+                    <label>School registration number<input name="registrationNumber" className="text-input" required minLength={2} maxLength={100} /></label>
+                    <label>Registered email<input name="email" type="email" className="text-input" required maxLength={254} /></label>
+                    <button className="small-action primary-small" disabled={busy || !activeElectionId}>Add voter</button>
+                  </form>}
+                  {selectedElection && selectedElection.status !== "draft" && <p className="admin-security-note">Voter eligibility is locked because this election is {selectedElection.status}.</p>}
+                  <p className="voter-data-note">Registration numbers are protected with one-way hashes, so this directory shows email and status instead of registration numbers.</p>
+                  <div className="admin-event-tools">
+                    <label className="admin-search"><span className="admin-search-icon" aria-hidden="true" /><span className="visually-hidden">Search voters by email</span><input value={voterSearch} onChange={(event) => setVoterSearch(event.target.value)} placeholder="Search by email" /></label>
+                    <span className="admin-result-count">{showingData?.total ?? 0} voters</span>
+                  </div>
+                  {votersLoading ? <p>Loading voters…</p>
+                    : !showingData?.voters.length ? <div className="admin-empty-state"><strong>No voters added</strong><p>Add an eligible voter above or import a CSV from the draft election card.</p></div>
+                      : <div className="admin-results-table-wrap voter-table-wrap">
+                        <table className="admin-results-table voter-table">
+                          <thead><tr><th scope="col">Registered email</th><th scope="col">Status</th><th scope="col">Date added</th></tr></thead>
+                          <tbody>{filteredVoters.map((voter) => <tr key={voter.id}>
+                            <td>{voter.email ?? "No email recorded"}</td>
+                            <td><span className={`event-status event-status-${voter.is_active ? "open" : "cancelled"}`}>{voter.is_active ? "Eligible" : "Inactive"}</span></td>
+                            <td>{formatDateTime(voter.created_at, settings)}</td>
+                          </tr>)}</tbody>
+                        </table>
+                        {!filteredVoters.length && <p className="admin-empty">No voters match that email.</p>}
+                      </div>}
+                  {showingData && showingData.total > showingData.pageSize && <nav className="admin-pagination" aria-label="Voter pages">
+                    <button type="button" className="small-action" disabled={votersLoading || voterPageNumber <= 1} onClick={() => setVoterPageNumber(voterPageNumber - 1)}>Previous</button>
+                    <span>Page {voterPageNumber} of {Math.ceil(showingData.total / showingData.pageSize)}</span>
+                    <button type="button" className="small-action" disabled={votersLoading || voterPageNumber >= Math.ceil(showingData.total / showingData.pageSize)} onClick={() => setVoterPageNumber(voterPageNumber + 1)}>Next</button>
+                  </nav>}
+                </>;
+              })()}
+            </>}
+        </section>}
+
+        {editor && <section className="admin-panel admin-editor" id="admin-editor">
           <div className="admin-panel-heading"><div><span className="public-overline">EDIT DRAFT</span><h2>
             {editor.kind === "candidate" ? (editor.candidateId ? "Edit contestant" : "Add contestant")
               : editor.kind === "position" ? "Edit electoral position"
@@ -543,10 +878,8 @@ export function AdminConsole() {
               </>}
               {(editor.kind === "position" || editor.kind === "new-position") && <>
                 <label>Position name<input name="title" className="text-input" required minLength={2} maxLength={120} defaultValue={editor.kind === "position" ? editor.title : ""} /></label>
-                {editor.kind === "position" && <>
-                  <label>Minimum candidate selections<input name="minSelections" type="number" className="text-input" min={0} max={10} required defaultValue={editor.minSelections} /></label>
-                  <label>Maximum candidate selections<input name="maxSelections" type="number" className="text-input" min={1} max={10} required defaultValue={editor.maxSelections} /></label>
-                </>}
+                <label>Minimum candidate selections<input name="minSelections" type="number" className="text-input" min={0} max={10} required defaultValue={editor.kind === "position" ? editor.minSelections : 1} /></label>
+                <label>Maximum candidate selections<input name="maxSelections" type="number" className="text-input" min={1} max={10} required defaultValue={editor.kind === "position" ? editor.maxSelections : 1} /></label>
               </>}
               {editor.kind === "candidate" && <>
                 <label>Contestant name<input name="name" className="text-input" required minLength={2} maxLength={120} defaultValue={editor.name} /></label>
@@ -573,7 +906,7 @@ export function AdminConsole() {
             <button type="button" className={eventType === "election" ? "type-selected" : ""} onClick={() => setEventType("election")}>Election</button>
             <button type="button" className={eventType === "poll" ? "type-selected" : ""} onClick={() => setEventType("poll")}>Poll</button>
           </div>
-          <form className="admin-create-form" onSubmit={(event) => {
+          <form className="admin-create-form" key={JSON.stringify(settings)} onSubmit={(event) => {
             event.preventDefault();
             const formElement = event.currentTarget;
             const form = new FormData(formElement);
@@ -581,9 +914,10 @@ export function AdminConsole() {
               type: eventType,
               title: String(form.get("title") ?? ""),
               description: String(form.get("description") ?? ""),
-              opensAt: new Date(String(form.get("opensAt"))).toISOString(),
-              closesAt: new Date(String(form.get("closesAt"))).toISOString(),
+              opensAt: instantFromZonedDateTime(String(form.get("opensAt")), settings.timeZone),
+              closesAt: instantFromZonedDateTime(String(form.get("closesAt")), settings.timeZone),
               secretBallots: true,
+              resultsPublic: settings.defaultResultsPublic,
               ...(eventType === "poll"
                 ? { prompt: String(form.get("prompt") ?? ""), options: String(form.get("options") ?? "").split("\n").map((line) => line.trim()).filter(Boolean), maxSelections: Number(form.get("maxSelections")), sessionDuplicateProtection: form.get("sessionDuplicateProtection") === "on", rateLimitPerMinute: Number(form.get("rateLimitPerMinute")), botProtection: form.get("botProtection") === "on" }
                 : { positions: String(form.get("positions") ?? "").split("\n").map((line) => line.trim()).filter(Boolean), maxSelectionsPerPosition: Number(form.get("maxSelectionsPerPosition")) }),
@@ -596,15 +930,15 @@ export function AdminConsole() {
             <div className="admin-form-grid">
               <label>Title<input name="title" className="text-input" required minLength={2} maxLength={160} placeholder="Student Council Election" /></label>
               <label>Description<textarea name="description" className="text-input admin-textarea" maxLength={2000} placeholder="Optional" /></label>
-              <label>Opens<input name="opensAt" className="text-input" type="datetime-local" required defaultValue={defaultOpen()} /></label>
-              <label>Closes<input name="closesAt" className="text-input" type="datetime-local" required defaultValue={defaultClose()} /></label>
+              <label>Opens ({settings.timeZone})<input name="opensAt" className="text-input" type="datetime-local" required defaultValue={defaultOpen(settings.timeZone)} /></label>
+              <label>Closes ({settings.timeZone})<input name="closesAt" className="text-input" type="datetime-local" required defaultValue={defaultClose(settings.timeZone, settings.defaultEventDurationHours)} /></label>
               {eventType === "poll" ? (
                 <>
                   <label>Question<textarea name="prompt" className="text-input admin-textarea" required placeholder="What would you like to ask?" /></label>
                   <label>Options (one per line)<textarea name="options" className="text-input admin-textarea" required placeholder={"Option one\nOption two"} /></label>
                   <label>Maximum selections<input name="maxSelections" type="number" className="text-input" min={1} max={20} defaultValue={1} /></label>
-                  <label className="admin-check"><input name="sessionDuplicateProtection" type="checkbox" defaultChecked /> Limit repeat votes per browser</label>
-                  <label>Votes per IP / minute<input name="rateLimitPerMinute" type="number" className="text-input" min={1} max={120} defaultValue={10} /></label>
+                  <label className="admin-check"><input name="sessionDuplicateProtection" type="checkbox" defaultChecked={settings.defaultPollSessionProtection} /> Limit repeat votes per browser</label>
+                  <label>Votes per IP / minute<input name="rateLimitPerMinute" type="number" className="text-input" min={1} max={120} defaultValue={settings.defaultPollRateLimit} /></label>
                   <label className="admin-check"><input name="botProtection" type="checkbox" /> Require bot check (Turnstile)</label>
                 </>
               ) : (
@@ -618,7 +952,7 @@ export function AdminConsole() {
           </form>
         </section>}
 
-        {(activeView !== "settings" && activeView !== "activity") && <section className="admin-panel admin-events-panel" id="events">
+        {(activeView !== "settings" && activeView !== "activity" && activeView !== "voters") && <section className="admin-panel admin-events-panel" id="events">
           <div className="admin-panel-heading admin-events-heading">
             <div><span className="public-overline">{activeView === "reports" ? "REPORTS" : activeView === "results" ? "RESULTS" : activeView === "links" ? "DISTRIBUTION" : "EVENTS"}</span><h2>{activeView === "dashboard" ? "All voting events" : viewCopy[activeView].title}</h2></div>
             <button className="quiet-button" disabled={busy || dashboardLoading} onClick={() => { setEventPage(1); void loadDashboard(); }}>{dashboardLoading ? "Refreshing…" : "Refresh"}</button>
@@ -638,11 +972,17 @@ export function AdminConsole() {
                   <div><span className="event-type-label">FORMAL ELECTION</span><h3>{election.title}</h3><p>{election.description}</p></div>
                   <span className={`event-status event-status-${election.status}`}>{election.status}</span>
                 </div>
+                <p className="event-schedule">Opens {formatDateTime(election.opens_at, settings)} · Closes {formatDateTime(election.closes_at, settings)} ({settings.timeZone})</p>
                 <div className="event-metrics"><span><strong>{election.eligibleCount}</strong> eligible</span><span><strong>{election.participationCount}</strong> participated</span><span><strong>{election.ballotCount}</strong> ballots</span></div>
                 {election.status !== "draft" && <p className="admin-empty">Editing is locked because this election is {election.status}. Contestants and positions can only be changed while it is a draft.</p>}
-                {election.status === "draft" && <button className="small-action" disabled={busy} onClick={() => setEditor({
-                  kind: "election", id: election.id, title: election.title, description: election.description,
-                })}>Edit election details</button>}
+                {election.status === "draft" && <div className="event-admin-actions">
+                  <button className="small-action" disabled={busy} onClick={() => setEditor({
+                    kind: "election", id: election.id, title: election.title, description: election.description,
+                  })}>Edit election details</button>
+                  <button className="small-action primary-small" type="button" onClick={() => {
+                    document.getElementById(`eligible-voters-${election.id}`)?.scrollIntoView({ behavior: "smooth", block: "center" });
+                  }}>Add eligible voters</button>
+                </div>}
                 {election.status === "draft" && <button className="small-action danger-action" onClick={() => {
                   setConfirmation({
                     message: `Permanently remove draft election “${election.title}”?`,
@@ -690,10 +1030,40 @@ export function AdminConsole() {
                 ))}
                 {election.status === "draft" && <button className="small-action add-position" disabled={busy} onClick={() => setEditor({ kind: "new-position", eventId: election.id })}>Add electoral position</button>}
                 {election.status === "draft" && (
-                  <div className="event-admin-actions">
+                  <section className="eligibility-management" id={`eligible-voters-${election.id}`}>
+                    <div className="eligibility-management-heading">
+                      <div>
+                        <span className="event-type-label">VOTER ELIGIBILITY</span>
+                        <h4>Eligible voters</h4>
+                        <p>Add voters individually or import a CSV before opening the election.</p>
+                      </div>
+                      <strong>{election.eligibleCount} added</strong>
+                    </div>
+                    <form className="eligibility-add-form" onSubmit={(event) => {
+                      event.preventDefault();
+                      const formElement = event.currentTarget;
+                      const form = new FormData(formElement);
+                      void runAction(async () => {
+                        await api(`/api/admin/events/${election.id}/eligibility`, {
+                          method: "POST",
+                          headers: { "Content-Type": "application/json" },
+                          body: JSON.stringify({
+                            registrationNumber: form.get("registrationNumber"),
+                            email: form.get("email"),
+                          }),
+                        });
+                        formElement.reset();
+                      }, "Eligible voter added.");
+                    }}>
+                      <label>School registration number<input name="registrationNumber" className="text-input" required minLength={2} maxLength={100} /></label>
+                      <label>Registered email<input name="email" type="email" className="text-input" required maxLength={254} /></label>
+                      <button className="small-action primary-small" disabled={busy}>Add voter</button>
+                    </form>
+                    <div className="event-admin-actions">
                     <label className="file-import-label">Import voter eligibility CSV<input type="file" accept=".csv,text/csv" disabled={busy} onChange={(event) => {
                       const file = event.target.files?.[0];
                       if (!file) return;
+                      const input = event.currentTarget;
                       void runAction(async () => {
                         const form = new FormData(); form.set("file", file);
                         const response = await fetch(`/api/admin/events/${election.id}/eligibility`, { method: "POST", body: form });
@@ -701,12 +1071,12 @@ export function AdminConsole() {
                           const result = await response.json() as { message?: string };
                           throw new AdminApiError(result.message ?? "Eligibility import failed.", response.status);
                         }
-                        const blob = await response.blob();
-                        const url = URL.createObjectURL(blob);
-                        const anchor = document.createElement("a"); anchor.href = url; anchor.download = `election-invitations-${election.id}.csv`; anchor.click(); URL.revokeObjectURL(url);
-                        event.target.value = "";
-                      }, "Eligibility loaded. Download the invitation file and distribute it securely.");
+                        const result = await response.json() as { imported: number };
+                        input.value = "";
+                        if (!result.imported) throw new Error("No eligible voters were imported.");
+                      }, "Eligible voters imported.");
                     }} /></label>
+                    <button className="small-action" disabled={busy} onClick={() => void copyElectionLink(election.id)}>Copy voter link</button>
                     <button className="small-action primary-small" disabled={busy} onClick={() => void runAction(async () => {
                       await api(`/api/admin/events/${election.id}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ type: "election", status: "open" }) });
                     }, "Election opened.")}>Open election</button>
@@ -714,8 +1084,10 @@ export function AdminConsole() {
                       await api(`/api/admin/events/${election.id}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ type: "election", status: "cancelled" }) });
                     }, "Election cancelled.")}>Cancel</button>
                   </div>
+                  </section>
                 )}
                 {election.status === "open" && <div className="event-admin-actions">
+                  <button className="small-action primary-small" disabled={busy} onClick={() => void copyElectionLink(election.id)}>Copy voter link</button>
                   <button className="small-action danger-action" disabled={busy} onClick={() => void runAction(async () => {
                     await api(`/api/admin/events/${election.id}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ type: "election", status: "closed" }) });
                   }, "Election closed.")}>Close election</button>
@@ -737,6 +1109,7 @@ export function AdminConsole() {
                     await api(`/api/admin/events/${election.id}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ type: "election", resultsPublic: !election.results_public }) });
                   }, election.results_public ? "Results hidden." : "Results published.")}>{election.results_public ? "Hide results" : "Publish results"}</button>
                 </div>}
+                {electionShare?.id === election.id && <p className="admin-shared-link"><span>Shared voter link</span><code>{electionShare.url}</code></p>}
               </article>
             ))}
 
@@ -746,6 +1119,7 @@ export function AdminConsole() {
                   <div><span className="event-type-label">PUBLIC POLL</span><h3>{poll.title}</h3><p>{poll.description}</p></div>
                   <span className={`event-status event-status-${poll.status}`}>{poll.status}</span>
                 </div>
+                <p className="event-schedule">Opens {formatDateTime(poll.opens_at, settings)} · Closes {formatDateTime(poll.closes_at, settings)} ({settings.timeZone})</p>
                 <div className="poll-preview"><strong>{poll.questions[0]?.prompt}</strong><span>{poll.questions[0]?.options.map((option) => option.label).join(" · ")}</span></div>
                 <div className="event-metrics"><span><strong>{poll.ballotCount}</strong> ballots</span><span><strong>{poll.session_duplicate_protection ? "On" : "Off"}</strong> session duplicate check</span><span><strong>{poll.rate_limit_per_minute}</strong> per IP/min</span><span><strong>{poll.bot_protection ? "On" : "Off"}</strong> bot protection</span></div>
                 {poll.status === "draft" && <div className="event-admin-actions">
@@ -851,12 +1225,69 @@ export function AdminConsole() {
           </div>
         </section>}
 
-        {activeView === "settings" && <section className="admin-panel admin-settings-panel">
-          <div className="admin-panel-heading"><div><span className="public-overline">ACCOUNT</span><h2>Administrator access</h2></div></div>
-          <div className="admin-settings-row"><span className="admin-account-avatar" aria-hidden="true">{admin.email.slice(0, 1).toUpperCase()}</span><div><strong>{admin.email}</strong><p>Only this administrator account can access the management workspace.</p></div></div>
-          <div className="admin-security-note"><span className="secure-dot" /><span>Protected session · Automatically expires after 8 hours · Voter accounts are not used</span></div>
-          <button className="small-action danger-action" disabled={busy} onClick={logout}>Sign out</button>
-        </section>}
+        {activeView === "settings" && <div className="admin-settings-stack">
+          <section className="admin-panel admin-settings-panel">
+            <div className="admin-panel-heading"><div><span className="public-overline">GENERAL</span><h2>School and display settings</h2><p>{settingsLoading ? "Loading saved settings…" : "These preferences are saved to the database and shared by the admin workspace."}</p></div></div>
+            {settingsLoadError && <div className="notice notice-error" role="alert">
+              <span>{settingsLoadError} Retry loading before saving so saved preferences are not overwritten.</span>
+              <button className="small-action" type="button" disabled={settingsLoading} onClick={() => void loadSettings().catch(() => {})}>Retry settings</button>
+            </div>}
+            <form className="admin-create-form settings-form" onSubmit={(event) => void saveSettings(event)}>
+              <div className="admin-form-grid">
+                <label>School or organization name<input className="text-input" maxLength={120} required value={settings.schoolName} onChange={(event) => setSettings({ ...settings, schoolName: event.target.value })} /></label>
+                <label>Contact email<input className="text-input" type="email" maxLength={254} value={settings.contactEmail} onChange={(event) => setSettings({ ...settings, contactEmail: event.target.value })} placeholder="Optional" /></label>
+                <label>Timezone
+                  <select className="text-input" value={settings.timeZone} onChange={(event) => setSettings({ ...settings, timeZone: event.target.value })}>
+                    {!supportedTimeZones.includes(settings.timeZone) && <option value={settings.timeZone}>{settings.timeZone}</option>}
+                    {supportedTimeZones.map((timeZone) => <option key={timeZone} value={timeZone}>{timeZone}</option>)}
+                  </select>
+                </label>
+                <label>Language
+                  <select className="text-input" value={settings.language} onChange={(event) => setSettings({ ...settings, language: event.target.value as PlatformSettings["language"] })}>
+                    <option value="en">English</option><option value="sw">Kiswahili</option>
+                  </select>
+                </label>
+                <label>Admin workspace theme
+                  <select className="text-input" value={settings.theme} onChange={(event) => setSettings({ ...settings, theme: event.target.value as PlatformSettings["theme"] })}>
+                    <option value="light">Light</option><option value="dark">Dark</option><option value="system">Use system preference</option>
+                  </select>
+                </label>
+              </div>
+              <p className="settings-help">Language currently applies to navigation labels and date formatting. Timezone is used for event date entry and display.</p>
+              <div className="admin-panel-heading settings-subheading"><div><span className="public-overline">ELECTIONS AND POLLS</span><h2>Default behavior</h2></div></div>
+              <div className="admin-form-grid">
+                <label>Default event duration (hours)<input className="text-input" type="number" min={1} max={720} step={1} value={settings.defaultEventDurationHours} onChange={(event) => setSettings({ ...settings, defaultEventDurationHours: Number(event.target.value) })} /></label>
+                <label>Poll votes per IP per minute<input className="text-input" type="number" min={1} max={120} step={1} value={settings.defaultPollRateLimit} onChange={(event) => setSettings({ ...settings, defaultPollRateLimit: Number(event.target.value) })} /></label>
+                <label className="admin-check"><input type="checkbox" checked={settings.defaultPollSessionProtection} onChange={(event) => setSettings({ ...settings, defaultPollSessionProtection: event.target.checked })} /> Enable browser-session duplicate protection by default</label>
+                <label className="admin-check"><input type="checkbox" checked={settings.defaultResultsPublic} onChange={(event) => setSettings({ ...settings, defaultResultsPublic: event.target.checked })} /> Publish results to voters by default after closing</label>
+                <label className="admin-check"><input type="checkbox" checked={settings.emailVerificationEnabled} onChange={(event) => setSettings({ ...settings, emailVerificationEnabled: event.target.checked })} /> Require email verification codes for election access</label>
+              </div>
+              <p className="settings-help">Email verification needs a working Resend configuration on the server. Keep this off to let eligible voters continue with their registration number only.</p>
+              <div className="admin-panel-heading settings-subheading"><div><span className="public-overline">SECURITY</span><h2>Administrator session</h2></div></div>
+              <div className="admin-form-grid">
+                <label>Session timeout (hours)<input className="text-input" type="number" min={1} max={24} step={1} value={settings.sessionTimeoutHours} onChange={(event) => setSettings({ ...settings, sessionTimeoutHours: Number(event.target.value) })} /></label>
+                <label>Administrator email<input className="text-input" value={admin.email} readOnly /></label>
+              </div>
+              <p className="settings-help">Session timeout changes apply the next time you sign in. Saving settings does not change the current session.</p>
+              <button className="small-action primary-small" disabled={busy || settingsLoading || Boolean(settingsLoadError)}>Save settings</button>
+            </form>
+          </section>
+          <section className="admin-panel admin-settings-panel">
+            <div className="admin-panel-heading"><div><span className="public-overline">PASSWORD</span><h2>Change administrator password</h2></div></div>
+            <form className="admin-form-grid settings-password-form" onSubmit={(event) => void changeAdminPassword(event)}>
+              <label>Current password<input className="text-input" type="password" autoComplete="current-password" minLength={6} required value={currentPassword} onChange={(event) => setCurrentPassword(event.target.value)} /></label>
+              <label>New password (at least 6 characters)<input className="text-input" type="password" autoComplete="new-password" minLength={6} maxLength={256} required value={newPassword} onChange={(event) => setNewPassword(event.target.value)} /></label>
+              <label>Confirm new password<input className="text-input" type="password" autoComplete="new-password" minLength={6} maxLength={256} required value={confirmNewPassword} onChange={(event) => setConfirmNewPassword(event.target.value)} /></label>
+              <button className="small-action primary-small" disabled={busy}>Change password and sign out</button>
+            </form>
+          </section>
+          <section className="admin-panel admin-settings-panel">
+            <div className="admin-panel-heading"><div><span className="public-overline">ACCOUNT</span><h2>Administrator access</h2></div></div>
+            <div className="admin-settings-row"><span className="admin-account-avatar" aria-hidden="true">{admin.email.slice(0, 1).toUpperCase()}</span><div><strong>{admin.email}</strong><p>Only this administrator account can access the management workspace.</p></div></div>
+            <div className="admin-security-note"><span className="secure-dot" /><span>Protected session · Automatically expires after {settings.sessionTimeoutHours} hours · Voter accounts are not used</span></div>
+            <button className="small-action danger-action" disabled={busy} onClick={logout}>Sign out</button>
+          </section>
+        </div>}
 
         {(activeView === "dashboard" || activeView === "activity") && <section className="admin-panel audit-panel" id="audit-log">
           <div className="admin-panel-heading">

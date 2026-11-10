@@ -136,7 +136,7 @@ export async function POST(request: Request) {
       opens_at: new Date(body.opensAt as string).toISOString(),
       closes_at: new Date(body.closesAt as string).toISOString(),
       status: "draft",
-      results_public: false,
+      results_public: body.resultsPublic === true,
       secret_ballots: body.secretBallots !== false,
       session_duplicate_protection: body.sessionDuplicateProtection !== false,
       rate_limit_per_minute: typeof body.rateLimitPerMinute === "number" ? Math.max(1, Math.min(120, Math.floor(body.rateLimitPerMinute))) : 10,
@@ -174,7 +174,7 @@ export async function POST(request: Request) {
     opens_at: new Date(body.opensAt as string).toISOString(),
     closes_at: new Date(body.closesAt as string).toISOString(),
     status: "draft",
-    results_public: false,
+    results_public: body.resultsPublic === true,
     secret_ballots: body.secretBallots !== false,
     created_by: admin.id,
   }).select("id").single();

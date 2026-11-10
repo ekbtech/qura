@@ -27,14 +27,21 @@ export async function POST(request: Request, context: Context) {
   if (typeof body.title !== "string" || body.title.trim().length < 2 || body.title.length > 120) {
     return NextResponse.json({ message: "Enter a valid position title." }, { status: 400 });
   }
+  const minSelections = body.minSelections === undefined ? 1 : body.minSelections;
+  const maxSelections = body.maxSelections === undefined ? 1 : body.maxSelections;
+  if (typeof minSelections !== "number" || !Number.isInteger(minSelections) || minSelections < 0 || minSelections > 10 ||
+      typeof maxSelections !== "number" || !Number.isInteger(maxSelections) || maxSelections < 1 || maxSelections > 10 ||
+      minSelections > maxSelections) {
+    return NextResponse.json({ message: "Set valid selection rules; minimum selections cannot exceed the maximum." }, { status: 400 });
+  }
   const { data: lastPosition, error: listError } = await supabase.from("election_positions").select("position")
     .eq("election_id", id).order("position", { ascending: false }).limit(1).maybeSingle();
   if (listError) return NextResponse.json({ message: "Could not load election positions." }, { status: 503 });
   const { data, error } = await supabase.from("election_positions").insert({
     election_id: id,
     title: body.title.trim(),
-    min_selections: 1,
-    max_selections: 1,
+    min_selections: minSelections,
+    max_selections: maxSelections,
     position: (lastPosition?.position ?? -1) + 1,
   }).select("id").single();
   if (error) return NextResponse.json({ message: "Could not add election position." }, { status: 503 });

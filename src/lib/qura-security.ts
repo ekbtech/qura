@@ -59,8 +59,7 @@ export function verifyPassword(password: string, salt: string, expectedHash: str
   return actual.length === expected.length && timingSafeEqual(actual, expected);
 }
 
-export function createAdminCookie(token: string): string {
-  const maxAge = SESSION_HOURS * 60 * 60;
+export function createAdminCookie(token: string, maxAge = SESSION_HOURS * 60 * 60): string {
   return `${SESSION_SECRET}=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${maxAge}${process.env.NODE_ENV === "production" ? "; Secure" : ""}`;
 }
 
@@ -72,8 +71,8 @@ export function adminCookieName(): string {
   return SESSION_SECRET;
 }
 
-export function adminSessionExpiry(): string {
-  return new Date(Date.now() + SESSION_HOURS * 60 * 60 * 1000).toISOString();
+export function adminSessionExpiry(hours = SESSION_HOURS): string {
+  return new Date(Date.now() + hours * 60 * 60 * 1000).toISOString();
 }
 
 export function createRateLimitKey(scope: string, clientAddress: string): string {

@@ -119,6 +119,16 @@ export type Database = {
         used_at: string | null;
         created_at: string;
       }>;
+      election_email_codes: Table<{
+        id: string;
+        election_id: string;
+        eligibility_id: string;
+        code_hash: string;
+        attempts: number;
+        expires_at: string;
+        consumed_at: string | null;
+        created_at: string;
+      }>;
       voting_links: Table<{
         id: string;
         poll_id: string;
