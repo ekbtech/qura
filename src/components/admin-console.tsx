@@ -202,6 +202,7 @@ export function AdminConsole() {
   const [voterData, setVoterData] = useState<VoterPage | null>(null);
   const [votersLoading, setVotersLoading] = useState(false);
   const [voterSearch, setVoterSearch] = useState("");
+  const [voterFormOpen, setVoterFormOpen] = useState(false);
   const [currentPassword, setCurrentPassword] = useState("");
   const [newPassword, setNewPassword] = useState("");
   const [confirmNewPassword, setConfirmNewPassword] = useState("");
@@ -559,6 +560,7 @@ export function AdminConsole() {
         }),
       });
       formElement.reset();
+      setVoterFormOpen(false);
       await Promise.all([loadDashboard(), loadVoters()]);
       setNotice({ kind: "success", text: "Eligible voter added." });
     } catch (error) {
@@ -804,7 +806,10 @@ export function AdminConsole() {
         {activeView === "voters" && <section className="admin-panel admin-voters-panel">
           <div className="admin-panel-heading">
             <div><span className="public-overline">ELIGIBILITY</span><h2>Voter directory</h2><p>Select an election to review and add eligible voters.</p></div>
-            <button className="quiet-button" type="button" disabled={votersLoading || !activeElectionId} onClick={() => void loadVoters().catch((error: unknown) => showActionError(error, "Could not load voters."))}>Refresh voters</button>
+            <div className="event-admin-actions">
+              <button className="small-action primary-small" type="button" disabled={!activeElectionId || dashboard?.elections.find((election) => election.id === activeElectionId)?.status.toLowerCase() !== "draft"} onClick={() => setVoterFormOpen((isOpen) => !isOpen)}>{voterFormOpen ? "Cancel" : "Add voter"}</button>
+              <button className="quiet-button" type="button" disabled={votersLoading || !activeElectionId} onClick={() => void loadVoters().catch((error: unknown) => showActionError(error, "Could not load voters."))}>Refresh voters</button>
+            </div>
           </div>
           {!dashboard && dashboardLoading
             ? <p>Loading elections…</p>
@@ -824,16 +829,17 @@ export function AdminConsole() {
               </label>
               {(() => {
                 const selectedElection = dashboard.elections.find((election) => election.id === activeElectionId);
+                const canAddVoters = selectedElection?.status.toLowerCase() === "draft";
                 const showingData = voterData?.election.id === activeElectionId ? voterData : null;
                 const filteredVoters = (showingData?.voters ?? []).filter((voter) =>
                   !voterSearch.trim() || (voter.email ?? "").toLowerCase().includes(voterSearch.trim().toLowerCase()));
                 return <>
-                  {selectedElection?.status === "draft" && <form className="eligibility-add-form voter-directory-add" onSubmit={(event) => void addVoter(event)}>
+                  {canAddVoters && voterFormOpen && <form id="voter-directory-add-form" className="eligibility-add-form voter-directory-add" onSubmit={(event) => void addVoter(event)}>
                     <label>School registration number<input name="registrationNumber" className="text-input" required minLength={2} maxLength={100} /></label>
                     <label>Registered email<input name="email" type="email" className="text-input" required maxLength={254} /></label>
                     <button className="small-action primary-small" disabled={busy || !activeElectionId}>Add voter</button>
                   </form>}
-                  {selectedElection && selectedElection.status !== "draft" && <p className="admin-security-note">Voter eligibility is locked because this election is {selectedElection.status}.</p>}
+                  {selectedElection && !canAddVoters && <p className="admin-security-note">Voter eligibility is locked because this election is {selectedElection.status}.</p>}
                   <p className="voter-data-note">Registration numbers are protected with one-way hashes, so this directory shows email and status instead of registration numbers.</p>
                   <div className="admin-event-tools">
                     <label className="admin-search"><span className="admin-search-icon" aria-hidden="true" /><span className="visually-hidden">Search voters by email</span><input value={voterSearch} onChange={(event) => setVoterSearch(event.target.value)} placeholder="Search by email" /></label>
